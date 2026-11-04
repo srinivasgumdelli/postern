@@ -380,26 +380,74 @@ func Digest(raw []byte) string {
 	return hex.EncodeToString(sum[:])
 }
 
-// Pin stores Digest(raw) in the keychain under secrets.ConfigPin. Only
-// the human runs this (`postern config pin`), after reviewing the file.
-func Pin(st secrets.Store, raw []byte) error {
-	if err := st.Set(secrets.ConfigPin, []byte(Digest(raw))); err != nil {
+// PinService is the keychain service that holds config pins. It is
+// compiled in and never read from a config file: if the pin's location
+// came from the file it protects, an edited file could point the check
+// at a keychain item its author created.
+const PinService = "postern-pin"
+
+// pinName is the keychain item name for the config at path. Pins are
+// bound to the file's absolute path, so pointing the bridge at another
+// file (--config, $POSTERN_CONFIG) finds no pin.
+func pinName(path string) (string, error) {
+	abs, err := filepath.Abs(path)
+	if err != nil {
+		return "", fmt.Errorf("config: resolve path: %w", err)
+	}
+	sum := sha256.Sum256([]byte(filepath.Clean(abs)))
+	return secrets.ConfigPin + "." + hex.EncodeToString(sum[:16]), nil
+}
+
+func pinValue(path string, raw []byte) (string, error) {
+	abs, err := filepath.Abs(path)
+	if err != nil {
+		return "", fmt.Errorf("config: resolve path: %w", err)
+	}
+	h := sha256.New()
+	h.Write([]byte(filepath.Clean(abs)))
+	h.Write([]byte{0})
+	h.Write(raw)
+	return hex.EncodeToString(h.Sum(nil)), nil
+}
+
+// Pin records raw as the trusted content of the config at path. st must
+// be the store for PinService. Only the human runs this, after reviewing
+// the file; the CLI asks for proof of presence first.
+func Pin(st secrets.Store, path string, raw []byte) error {
+	name, err := pinName(path)
+	if err != nil {
+		return err
+	}
+	v, err := pinValue(path, raw)
+	if err != nil {
+		return err
+	}
+	if err := st.Set(name, []byte(v)); err != nil {
 		return fmt.Errorf("config: store pin: %w", err)
 	}
 	return nil
 }
 
-// VerifyPin checks raw against the stored pin. It returns ErrNotPinned
-// if there is no pin and ErrPinMismatch if the file changed.
-func VerifyPin(st secrets.Store, raw []byte) error {
-	want, err := st.Get(secrets.ConfigPin)
+// VerifyPin checks raw against the pin for path. It returns ErrNotPinned
+// if there is no pin and ErrPinMismatch if the file changed. Call it
+// before using any value from the file.
+func VerifyPin(st secrets.Store, path string, raw []byte) error {
+	name, err := pinName(path)
+	if err != nil {
+		return err
+	}
+	v, err := pinValue(path, raw)
+	if err != nil {
+		return err
+	}
+	want, err := st.Get(name)
 	if errors.Is(err, secrets.ErrNotFound) {
 		return ErrNotPinned
 	}
 	if err != nil {
 		return fmt.Errorf("config: read pin: %w", err)
 	}
-	if subtle.ConstantTimeCompare([]byte(Digest(raw)), want) != 1 {
+	if subtle.ConstantTimeCompare([]byte(v), want) != 1 {
 		return ErrPinMismatch
 	}
 	return nil

@@ -1,6 +1,7 @@
 package cli
 
 import (
+	"crypto/rand"
 	"errors"
 	"fmt"
 	"os"
@@ -50,10 +51,21 @@ func cmdInit(env Env, args []string) error {
 	if err != nil {
 		return fmt.Errorf("open keychain: %w", err)
 	}
+	pinStore, err := env.OpenStore(config.PinService)
+	if err != nil {
+		return fmt.Errorf("open keychain: %w", err)
+	}
 	if !*force {
 		if _, err := store.Get(secrets.BoxPrivateKey); err == nil {
 			return fmt.Errorf("keychain service %q already holds a Postern key (use --force to replace it)", cfg.KeychainService)
 		}
+	}
+	what := "Initialise this bridge: generate new keys and trust this config."
+	if *force {
+		what = "Re-initialise this bridge: REPLACE its keys (peers must re-pin the new public key) and trust this config."
+	}
+	if err := confirm(env, what+"\n\n"+describe(path, cfg)); err != nil {
+		return err
 	}
 
 	pub, priv, err := envelope.GenerateKey()
@@ -76,13 +88,30 @@ func cmdInit(env Env, args []string) error {
 		return fmt.Errorf("store tls key: %w", err)
 	}
 	clear(der)
+	// The inbox key encrypts the local inbox at rest. Keep an existing
+	// one so a re-init does not orphan stored messages.
+	if _, err := store.Get(secrets.InboxKey); errors.Is(err, secrets.ErrNotFound) {
+		var k [32]byte
+		if _, err := rand.Read(k[:]); err != nil {
+			return err
+		}
+		if err := store.Set(secrets.InboxKey, k[:]); err != nil {
+			return fmt.Errorf("store inbox key: %w", err)
+		}
+		clear(k[:])
+	} else if err != nil {
+		return fmt.Errorf("read inbox key: %w", err)
+	}
 	for _, stale := range []string{secrets.TLSCertificate, nextTLSKey} {
 		if err := store.Delete(stale); err != nil && !errors.Is(err, secrets.ErrNotFound) {
 			return fmt.Errorf("remove old %s: %w", stale, err)
 		}
 	}
-	l := &loaded{path: path, cfg: cfg, store: store}
-	if err := l.save(); err != nil {
+	raw, err := config.Save(path, cfg)
+	if err != nil {
+		return err
+	}
+	if err := config.Pin(pinStore, path, raw); err != nil {
 		return err
 	}
 	csr, err := tlsutil.CreateCSR(tlsKey, cfg.PeerName)
@@ -165,7 +194,7 @@ func cmdPeerAdd(env Env, args []string) error {
 	if err := l.cfg.Validate(); err != nil {
 		return err
 	}
-	if err := l.save(); err != nil {
+	if err := l.save(env, fmt.Sprintf("Trust peer %s with fingerprint\n  %s\nOnly confirm if you compared this fingerprint with the peer out of band.", *name, want)); err != nil {
 		return err
 	}
 	fmt.Fprintf(env.Stdout, "Added peer %s (%s). Config re-pinned.\n", *name, want)
@@ -187,7 +216,7 @@ func cmdPeerRemove(env Env, args []string) error {
 		return fmt.Errorf("no peer %q", *name)
 	}
 	l.cfg.Peers = slices.Delete(l.cfg.Peers, i, i+1)
-	if err := l.save(); err != nil {
+	if err := l.save(env, "Stop trusting peer "+*name+"."); err != nil {
 		return err
 	}
 	fmt.Fprintf(env.Stdout, "Removed peer %s. Config re-pinned.\n", *name)
@@ -233,7 +262,7 @@ func editSessions(env Env, cmd string, args []string, edit func(*config.Config, 
 	if err := l.cfg.Validate(); err != nil {
 		return err
 	}
-	if err := l.save(); err != nil {
+	if err := l.save(env, "Change which sessions may use this bridge ("+cmd+" "+fs.Arg(0)+")."); err != nil {
 		return err
 	}
 	fmt.Fprintf(env.Stdout, "Sessions: %s. Config re-pinned.\n", strings.Join(l.cfg.Sessions, ", "))
@@ -241,7 +270,7 @@ func editSessions(env Env, cmd string, args []string, edit func(*config.Config, 
 }
 
 // cmdConfigPin is the one command that accepts an unpinned or changed
-// config: it shows what will be trusted, then pins it.
+// config: it shows the human what will be trusted, then pins it.
 func cmdConfigPin(env Env, args []string) error {
 	fs, cfgFlag := newFlags(env, "config pin")
 	if err := fs.Parse(args); err != nil {
@@ -255,24 +284,19 @@ func cmdConfigPin(env Env, args []string) error {
 	if err != nil {
 		return err
 	}
-	store, err := env.OpenStore(cfg.KeychainService)
+	pinStore, err := env.OpenStore(config.PinService)
 	if err != nil {
 		return fmt.Errorf("open keychain: %w", err)
 	}
-	w := env.Stdout
-	fmt.Fprintf(w, "Pinning %s (sha256 %s)\n", path, config.Digest(raw))
-	fmt.Fprintf(w, "  peer name: %s\n  relay:     %s\n", cfg.PeerName, cfg.RelayURL)
-	if cfg.RelayCAFile != "" {
-		fmt.Fprintf(w, "  relay CA:  %s\n", cfg.RelayCAFile)
-	}
-	fmt.Fprintf(w, "  sessions:  %s\n", strings.Join(cfg.Sessions, ", "))
-	for _, p := range cfg.Peers {
-		fmt.Fprintf(w, "  peer:      %s %s\n", p.Name, p.Fingerprint)
-	}
-	if err := config.Pin(store, raw); err != nil {
+	summary := fmt.Sprintf("Pin this config as trusted (sha256 %s).\nCheck every line; anything you did not change yourself is tampering.\n\n%s",
+		config.Digest(raw), describe(path, cfg))
+	if err := confirm(env, summary); err != nil {
 		return err
 	}
-	fmt.Fprintln(w, "Pinned.")
+	if err := config.Pin(pinStore, path, raw); err != nil {
+		return err
+	}
+	fmt.Fprintln(env.Stdout, "Pinned.")
 	return nil
 }
 

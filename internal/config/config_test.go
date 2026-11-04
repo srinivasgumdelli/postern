@@ -9,7 +9,6 @@ import (
 	"testing"
 
 	"postern/internal/envelope"
-	"postern/internal/secrets"
 	"postern/internal/secrets/secretstest"
 )
 
@@ -303,21 +302,22 @@ func TestPinRoundTrip(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := VerifyPin(st, raw); !errors.Is(err, ErrNotPinned) {
+	if err := VerifyPin(st, path, raw); !errors.Is(err, ErrNotPinned) {
 		t.Fatalf("before pin: got %v, want ErrNotPinned", err)
 	}
-	if err := Pin(st, raw); err != nil {
+	if err := Pin(st, path, raw); err != nil {
 		t.Fatal(err)
 	}
-	stored, err := st.Get(secrets.ConfigPin)
-	if err != nil || string(stored) != Digest(raw) {
-		t.Fatalf("stored pin: %q, %v", stored, err)
+	// The same content at another path is not pinned.
+	other := filepath.Join(t.TempDir(), "config.json")
+	if err := VerifyPin(st, other, raw); !errors.Is(err, ErrNotPinned) {
+		t.Fatalf("other path: got %v, want ErrNotPinned", err)
 	}
 	_, loaded, err := Load(path)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := VerifyPin(st, loaded); err != nil {
+	if err := VerifyPin(st, path, loaded); err != nil {
 		t.Fatalf("after pin: %v", err)
 	}
 
@@ -326,23 +326,23 @@ func TestPinRoundTrip(t *testing.T) {
 	if string(edited) == string(loaded) {
 		t.Fatal("edit did nothing")
 	}
-	if err := VerifyPin(st, edited); !errors.Is(err, ErrPinMismatch) {
+	if err := VerifyPin(st, path, edited); !errors.Is(err, ErrPinMismatch) {
 		t.Fatalf("after edit: got %v, want ErrPinMismatch", err)
 	}
 	flipped := append([]byte(nil), loaded...)
 	flipped[len(flipped)/2] ^= 1
-	if err := VerifyPin(st, flipped); !errors.Is(err, ErrPinMismatch) {
+	if err := VerifyPin(st, path, flipped); !errors.Is(err, ErrPinMismatch) {
 		t.Fatalf("flipped byte: got %v, want ErrPinMismatch", err)
 	}
 
 	// Re-pinning accepts the new content.
-	if err := Pin(st, edited); err != nil {
+	if err := Pin(st, path, edited); err != nil {
 		t.Fatal(err)
 	}
-	if err := VerifyPin(st, edited); err != nil {
+	if err := VerifyPin(st, path, edited); err != nil {
 		t.Fatal(err)
 	}
-	if err := VerifyPin(st, loaded); !errors.Is(err, ErrPinMismatch) {
+	if err := VerifyPin(st, path, loaded); !errors.Is(err, ErrPinMismatch) {
 		t.Fatalf("old content after re-pin: %v", err)
 	}
 }

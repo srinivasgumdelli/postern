@@ -30,7 +30,12 @@ type Env struct {
 	MCPTransport mcp.Transport
 	// Executable returns the absolute path of the running binary.
 	Executable func() (string, error)
-	Version    string
+	// Confirm asks the human to approve a change to what the bridge
+	// trusts (keys, peers, sessions, the config pin). Production reads a
+	// one-time code from the controlling terminal, so a command run by an
+	// agent without a terminal cannot confirm.
+	Confirm func(summary string) error
+	Version string
 }
 
 // DefaultEnv is the environment of the real binary.
@@ -41,6 +46,7 @@ func DefaultEnv(version string) Env {
 		Stderr:     os.Stderr,
 		OpenStore:  secrets.NewKeychain,
 		Executable: os.Executable,
+		Confirm:    ttyConfirm,
 		Version:    version,
 	}
 }
@@ -140,11 +146,12 @@ func configPath(flagValue string) (string, error) {
 	return config.DefaultPath()
 }
 
-// loaded is a config that passed its pin check, with its secret store.
+// loaded is a config that passed its pin check, with its secret stores.
 type loaded struct {
-	path  string
-	cfg   *config.Config
-	store secrets.Store
+	path     string
+	cfg      *config.Config
+	store    secrets.Store // the bridge's keys (cfg.KeychainService)
+	pinStore secrets.Store // config pins (config.PinService, fixed)
 }
 
 // loadPinned loads the config and refuses it unless it matches the pin
@@ -159,11 +166,12 @@ func loadPinned(env Env, flagValue string) (*loaded, error) {
 	if err != nil {
 		return nil, err
 	}
-	store, err := env.OpenStore(cfg.KeychainService)
+	// The pin lives under a fixed service, never one named by the file.
+	pinStore, err := env.OpenStore(config.PinService)
 	if err != nil {
 		return nil, fmt.Errorf("open keychain: %w", err)
 	}
-	switch err := config.VerifyPin(store, raw); {
+	switch err := config.VerifyPin(pinStore, path, raw); {
 	case errors.Is(err, config.ErrNotPinned):
 		return nil, errors.New("config is not pinned; review it, then run `postern config pin`")
 	case errors.Is(err, config.ErrPinMismatch):
@@ -171,16 +179,46 @@ func loadPinned(env Env, flagValue string) (*loaded, error) {
 	case err != nil:
 		return nil, fmt.Errorf("check config pin: %w", err)
 	}
-	return &loaded{path: path, cfg: cfg, store: store}, nil
+	// Only now is anything from the file trusted, including where the
+	// bridge's own keys live.
+	store, err := env.OpenStore(cfg.KeychainService)
+	if err != nil {
+		return nil, fmt.Errorf("open keychain: %w", err)
+	}
+	return &loaded{path: path, cfg: cfg, store: store, pinStore: pinStore}, nil
 }
 
-// save writes the config and re-pins it in one step.
-func (l *loaded) save() error {
+// save asks the human to confirm, then writes the config and re-pins it.
+func (l *loaded) save(env Env, what string) error {
+	if err := confirm(env, what+"\n\n"+describe(l.path, l.cfg)); err != nil {
+		return err
+	}
 	raw, err := config.Save(l.path, l.cfg)
 	if err != nil {
 		return err
 	}
-	return config.Pin(l.store, raw)
+	return config.Pin(l.pinStore, l.path, raw)
+}
+
+func confirm(env Env, summary string) error {
+	if env.Confirm == nil {
+		return errors.New("no way to confirm with the human")
+	}
+	return env.Confirm(summary)
+}
+
+// describe summarises what a config makes the bridge trust.
+func describe(path string, c *config.Config) string {
+	var b strings.Builder
+	fmt.Fprintf(&b, "Config:    %s\nPeer name: %s\nRelay:     %s\n", path, c.PeerName, c.RelayURL)
+	if c.RelayCAFile != "" {
+		fmt.Fprintf(&b, "Relay CA:  %s\n", c.RelayCAFile)
+	}
+	fmt.Fprintf(&b, "Keychain:  %s\nSessions:  %s\n", c.KeychainService, strings.Join(c.Sessions, ", "))
+	for _, p := range c.Peers {
+		fmt.Fprintf(&b, "Peer:      %s  %s\n", p.Name, p.Fingerprint)
+	}
+	return b.String()
 }
 
 type stringList []string

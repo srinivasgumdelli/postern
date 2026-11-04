@@ -18,6 +18,7 @@ const (
 	TLSPrivateKey  = "tls-private-key"
 	TLSCertificate = "tls-certificate"
 	ConfigPin      = "config-pin"
+	InboxKey       = "inbox-key"
 )
 
 // Errors returned by Store implementations. Callers match with errors.Is.
