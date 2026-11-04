@@ -530,7 +530,7 @@ func TestPerformance(t *testing.T) {
 		start := time.Now()
 		_ = Check("subject", body)
 		d := time.Since(start)
-		if d > 500*time.Millisecond {
+		if d > 500*time.Millisecond*raceFactor {
 			t.Errorf("%s: Check took %v on %d bytes", name, d, len(body))
 		}
 		t.Logf("%-18s %6d bytes %v", name, len(body), d)
