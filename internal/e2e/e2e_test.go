@@ -7,9 +7,12 @@ import (
 	"bytes"
 	"context"
 	"crypto/ecdsa"
+	"crypto/sha256"
 	"crypto/tls"
+	"encoding/hex"
 	"encoding/json"
 	"encoding/pem"
+	"errors"
 	"io"
 	"log/slog"
 	"net/http"
@@ -62,13 +65,29 @@ type node struct {
 	name    string
 	session string
 	cfg     string
-	store   *secretstest.Memory
 	logs    *syncBuffer
+	confirm func(string) error
+
+	mu     sync.Mutex
+	stores map[string]*secretstest.Memory // one per keychain service, like the real keychain
 }
 
 func newNode(t *testing.T, name, session string) *node {
 	dir := t.TempDir()
-	return &node{name: name, session: session, cfg: filepath.Join(dir, "config.json"), store: secretstest.NewMemory(), logs: &syncBuffer{}}
+	return &node{
+		name: name, session: session, cfg: filepath.Join(dir, "config.json"), logs: &syncBuffer{},
+		confirm: func(string) error { return nil }, // the operator says yes
+		stores:  map[string]*secretstest.Memory{},
+	}
+}
+
+func (n *node) store(service string) *secretstest.Memory {
+	n.mu.Lock()
+	defer n.mu.Unlock()
+	if n.stores[service] == nil {
+		n.stores[service] = secretstest.NewMemory()
+	}
+	return n.stores[service]
 }
 
 func (n *node) env(stdout io.Writer) cli.Env {
@@ -76,8 +95,9 @@ func (n *node) env(stdout io.Writer) cli.Env {
 		Stdin:      strings.NewReader(""),
 		Stdout:     stdout,
 		Stderr:     n.logs,
-		OpenStore:  func(string) (secrets.Store, error) { return n.store, nil },
+		OpenStore:  func(s string) (secrets.Store, error) { return n.store(s), nil },
 		Executable: os.Executable,
+		Confirm:    func(s string) error { return n.confirm(s) },
 		Version:    "test",
 	}
 }
@@ -371,6 +391,24 @@ func TestMessageOutAndReplyBack(t *testing.T) {
 			}
 		}
 	}
+	// Each bridge's own inbox is encrypted at rest, so reading the file
+	// directly (instead of through check_inbox) shows no untrusted text.
+	for _, n := range []*node{w.a, w.b} {
+		for _, f := range []string{"inbox.db", "inbox.db-wal"} {
+			raw, err := os.ReadFile(filepath.Join(filepath.Dir(n.cfg), f))
+			if err != nil {
+				if os.IsNotExist(err) && f != "inbox.db" {
+					continue
+				}
+				t.Fatal(err)
+			}
+			for _, marker := range []string{subjectMarker, bodyMarker, replyMarker} {
+				if bytes.Contains(raw, []byte(marker)) {
+					t.Fatalf("%s %s holds plaintext %q", n.name, f, marker)
+				}
+			}
+		}
+	}
 	for name, logs := range map[string]string{"relay": w.relayLog.String(), "peer-a": w.a.logs.String(), "peer-b": w.b.logs.String()} {
 		for _, marker := range []string{subjectMarker, bodyMarker, replyMarker} {
 			if strings.Contains(logs, marker) {
@@ -441,10 +479,78 @@ func TestEditedConfigRefusedUntilRepinned(t *testing.T) {
 	w.a.run(t, 0, "show")
 }
 
+// TestConfigCannotRedirectItsOwnPin is the attack where an edited config
+// names a keychain service its author controls and fills it with a
+// matching pin and keys. The pin must come from a fixed place instead.
+func TestConfigCannotRedirectItsOwnPin(t *testing.T) {
+	w := setup(t)
+	raw, err := os.ReadFile(w.a.cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	edited := strings.Replace(string(raw), `"keychain_service": "postern"`, `"keychain_service": "evil"`, 1)
+	edited = strings.Replace(edited, w.srv.URL, "https://attacker.example", 1)
+	if edited == string(raw) {
+		t.Fatal("fixture edit did not apply")
+	}
+	if err := os.WriteFile(w.a.cfg, []byte(edited), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	// The attacker seeds "evil" with everything the old design trusted.
+	evil := w.a.store("evil")
+	sum := sha256.Sum256([]byte(edited))
+	for name, v := range map[string][]byte{
+		secrets.ConfigPin:      []byte(hex.EncodeToString(sum[:])),
+		secrets.BoxPrivateKey:  make([]byte, 32),
+		secrets.TLSPrivateKey:  []byte("x"),
+		secrets.TLSCertificate: []byte("x"),
+		secrets.InboxKey:       make([]byte, 32),
+	} {
+		if err := evil.Set(name, v); err != nil {
+			t.Fatal(err)
+		}
+	}
+	out := w.a.run(t, 1, "show")
+	if strings.Contains(out, "attacker.example") {
+		t.Fatal("tampered config was used")
+	}
+	if !strings.Contains(w.a.logs.String(), "config changed") {
+		t.Fatalf("unexpected error: %s", w.a.logs.String())
+	}
+}
+
+// TestChangesNeedTheHuman checks that every command that changes what
+// the bridge trusts stops when the human does not confirm.
+func TestChangesNeedTheHuman(t *testing.T) {
+	w := setup(t)
+	before, _ := os.ReadFile(w.a.cfg)
+	var asked int
+	w.a.confirm = func(summary string) error {
+		asked++
+		if !strings.Contains(summary, "peer-a") {
+			t.Errorf("confirmation summary does not describe the config:\n%s", summary)
+		}
+		return errors.New("not confirmed")
+	}
+	w.a.runSub(t, 1, "session", "add", "other")
+	w.a.runSub(t, 1, "peer", "remove", "--name", "peer-b")
+	w.a.runSub(t, 1, "config", "pin")
+	w.a.run(t, 1, "init", "--force", "--peer-name", "peer-a", "--relay-url", w.srv.URL)
+	if asked != 4 {
+		t.Fatalf("asked %d times, want 4", asked)
+	}
+	after, _ := os.ReadFile(w.a.cfg)
+	if !bytes.Equal(before, after) {
+		t.Fatal("config changed without confirmation")
+	}
+	w.a.confirm = func(string) error { return nil }
+	w.a.run(t, 0, "show")
+}
+
 func TestEdgeCheckAgainstLocalRelay(t *testing.T) {
 	w := setup(t)
 	out := w.a.run(t, 0, "edge-check")
-	if strings.Contains(out, "FAIL") || strings.Count(out, "PASS") != 5 {
+	if strings.Contains(out, "FAIL") || strings.Count(out, "PASS") != 6 {
 		t.Fatalf("edge-check:\n%s", out)
 	}
 }
