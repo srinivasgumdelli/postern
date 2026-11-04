@@ -59,6 +59,57 @@ type SendOutput struct {
 	ID     string `json:"id" jsonschema:"id of the outgoing message"`
 	Thread string `json:"thread" jsonschema:"thread id; pass it to reply or send to continue the thread"`
 	Status string `json:"status" jsonschema:"sent, or queued if the relay is unreachable and the message will be retried"`
+	// RelayStatus is set by the server from StatusReporter, not by the
+	// Service; it is omitted while the relay is healthy.
+	RelayStatus string `json:"relay_status,omitempty" jsonschema:"set only when the relay is unhealthy: relay_auth_failed or relay_unreachable"`
+}
+
+// StatusReporter is optionally implemented by a Service. RelayStatus returns
+// "" while the relay is healthy, "relay_auth_failed" when the relay or edge
+// rejects this bridge's client certificate, or "relay_unreachable".
+type StatusReporter interface {
+	RelayStatus() string
+}
+
+// Relay status codes and the sentences shown with them.
+const (
+	RelayAuthFailed  = "relay_auth_failed"
+	RelayUnreachable = "relay_unreachable"
+)
+
+var (
+	relayStatusDetail = map[string]string{
+		RelayAuthFailed:  "The relay rejected this bridge's client certificate; inbound messages are not arriving and outgoing ones are queued. Ask the human to run `postern edge-check`.",
+		RelayUnreachable: "The relay is unreachable; messages are queued and will retry.",
+	}
+	relayStatusGeneric = "The relay reports a problem; messages may be delayed. Ask the human to check Postern."
+	statusCodeRe       = regexp.MustCompile(`^[a-z0-9_]{1,64}$`)
+)
+
+// relayStatus returns the current relay status code and its sentence, or
+// two empty strings when the relay is healthy or the Service does not report
+// status. A misbehaving reporter never fails the tool call.
+func (h *handlers) relayStatus() (code, detail string) {
+	sr, ok := h.svc.(StatusReporter)
+	if !ok {
+		return "", ""
+	}
+	defer func() {
+		if recover() != nil {
+			code, detail = "", ""
+		}
+	}()
+	code = sr.RelayStatus()
+	if code == "" {
+		return "", ""
+	}
+	if !statusCodeRe.MatchString(code) {
+		code = "unknown"
+	}
+	if d, ok := relayStatusDetail[code]; ok {
+		return code, d
+	}
+	return code, relayStatusGeneric
 }
 
 // Message is an inbound message as the Service returns it. Subject and Body
@@ -265,6 +316,7 @@ func (h *handlers) send(ctx context.Context, _ *mcp.CallToolRequest, in SendInpu
 	if err != nil {
 		return nil, SendOutput{}, serviceError(err)
 	}
+	out.RelayStatus, _ = h.relayStatus()
 	return nil, out, nil
 }
 
@@ -280,6 +332,7 @@ func (h *handlers) reply(ctx context.Context, _ *mcp.CallToolRequest, in ReplyIn
 	if err != nil {
 		return nil, SendOutput{}, serviceError(err)
 	}
+	out.RelayStatus, _ = h.relayStatus()
 	return nil, out, nil
 }
 
@@ -305,9 +358,10 @@ func (h *handlers) checkInbox(ctx context.Context, _ *mcp.CallToolRequest, in Ch
 	if err != nil {
 		return nil, inboxOutput{}, err
 	}
+	out.RelayStatus, out.RelayStatusDetail = h.relayStatus()
 	// Write the text content ourselves: the SDK's fallback text goes through
 	// a map (sorted keys) and HTML-escapes "<" and ">", which would turn the
-	// delimiters into < sequences. Our encoding keeps field order
+	// delimiters into \u003c sequences. Our encoding keeps field order
 	// (message_count first, no spaces) and the delimiters readable.
 	text, err := encodeJSON(out)
 	if err != nil {

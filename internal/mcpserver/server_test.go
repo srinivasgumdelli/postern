@@ -843,3 +843,113 @@ func jsonString(t *testing.T, s string) string {
 	}
 	return strings.TrimSuffix(strings.TrimPrefix(enc, `"`), `"`)
 }
+
+// statusService is a fakeService that also implements StatusReporter.
+type statusService struct {
+	fakeService
+	status      string
+	statusPanic bool
+}
+
+func (s *statusService) RelayStatus() string {
+	if s.statusPanic {
+		panic("status: internal state")
+	}
+	return s.status
+}
+
+func TestRelayStatusInCheckInbox(t *testing.T) {
+	cases := []struct{ status, code, detail string }{
+		{RelayAuthFailed, "relay_auth_failed", "The relay rejected this bridge's client certificate; inbound messages are not arriving and outgoing ones are queued. Ask the human to run `postern edge-check`."},
+		{RelayUnreachable, "relay_unreachable", "The relay is unreachable; messages are queued and will retry."},
+		{"relay_slow", "relay_slow", relayStatusGeneric},
+		{"Bad\x1b[2J code", "unknown", relayStatusGeneric},
+	}
+	for _, c := range cases {
+		for _, msgs := range [][]Message{nil, sampleMessages()} {
+			t.Run(fmt.Sprintf("%s/%d", c.code, len(msgs)), func(t *testing.T) {
+				cs := connect(t, &statusService{fakeService: fakeService{msgs: msgs}, status: c.status}, nil)
+				res := call(t, cs, "check_inbox", nil)
+				if res.IsError {
+					t.Fatalf("check_inbox failed: %s", resultText(t, res))
+				}
+				text := resultText(t, res)
+				prefix := fmt.Sprintf(`{"message_count":%d,"notice":`, len(msgs))
+				if !strings.HasPrefix(text, prefix) {
+					t.Fatalf("text does not start with %s: %s", prefix, text)
+				}
+				order := []string{`"message_count":`, `"notice":`, `"relay_status":`, `"relay_status_detail":`, `"messages":`}
+				last := -1
+				for _, k := range order {
+					i := strings.Index(text, k)
+					if i <= last {
+						t.Fatalf("key %s out of order in %s", k, text)
+					}
+					last = i
+				}
+				var out inboxOutput
+				if err := json.Unmarshal([]byte(text), &out); err != nil {
+					t.Fatal(err)
+				}
+				if out.RelayStatus != c.code || out.RelayStatusDetail != c.detail {
+					t.Errorf("relay status = %q / %q, want %q / %q", out.RelayStatus, out.RelayStatusDetail, c.code, c.detail)
+				}
+				if out.MessageCount != len(msgs) || len(out.Messages) != len(msgs) {
+					t.Errorf("count %d, len %d", out.MessageCount, len(out.Messages))
+				}
+				sc, _ := json.Marshal(res.StructuredContent)
+				if !strings.Contains(string(sc), fmt.Sprintf(`"message_count":%d`, len(msgs))) || !strings.Contains(string(sc), `"relay_status":"`+c.code+`"`) {
+					t.Errorf("structured content = %s", sc)
+				}
+			})
+		}
+	}
+}
+
+func TestRelayStatusInSendAndReply(t *testing.T) {
+	for _, code := range []string{RelayAuthFailed, RelayUnreachable} {
+		svc := &statusService{fakeService: fakeService{sendOut: SendOutput{ID: "01JC9Z00000000000000000009", Thread: testThread, Status: "queued"}}, status: code}
+		cs := connect(t, svc, nil)
+		for name, args := range map[string]map[string]any{
+			"send":  {"to": "peer-b", "subject": "s", "body": "b"},
+			"reply": {"thread": testThread, "body": "b"},
+		} {
+			res := call(t, cs, name, args)
+			if res.IsError {
+				t.Fatalf("%s failed: %s", name, resultText(t, res))
+			}
+			want := `{"id":"01JC9Z00000000000000000009","relay_status":"` + code + `","status":"queued","thread":"` + testThread + `"}`
+			if got := resultText(t, res); got != want {
+				t.Errorf("%s output = %s, want %s", name, got, want)
+			}
+		}
+	}
+}
+
+func TestRelayStatusAbsentWhenHealthyOrNotImplemented(t *testing.T) {
+	services := map[string]Service{
+		"not implemented": &fakeService{msgs: sampleMessages(), sendOut: SendOutput{ID: "01JC9Z00000000000000000009", Thread: testThread, Status: "sent"}},
+		"healthy":         &statusService{fakeService: fakeService{msgs: sampleMessages(), sendOut: SendOutput{ID: "01JC9Z00000000000000000009", Thread: testThread, Status: "sent"}}},
+		"reporter panics": &statusService{fakeService: fakeService{msgs: sampleMessages(), sendOut: SendOutput{ID: "01JC9Z00000000000000000009", Thread: testThread, Status: "sent"}}, status: RelayAuthFailed, statusPanic: true},
+	}
+	for name, svc := range services {
+		t.Run(name, func(t *testing.T) {
+			cs := connect(t, svc, nil)
+			res := call(t, cs, "check_inbox", nil)
+			text := resultText(t, res)
+			if res.IsError || !strings.HasPrefix(text, `{"message_count":2,"notice":`) {
+				t.Fatalf("check_inbox = %s", text)
+			}
+			if strings.Contains(text, "relay_status") {
+				t.Errorf("check_inbox has relay status: %s", text)
+			}
+			if i, j := strings.Index(text, `"notice":`), strings.Index(text, `,"messages":[`); i < 0 || j < i {
+				t.Errorf("messages does not follow notice: %s", text)
+			}
+			res = call(t, cs, "send", map[string]any{"to": "peer-b", "subject": "s", "body": "b"})
+			if got := resultText(t, res); res.IsError || got != `{"id":"01JC9Z00000000000000000009","status":"sent","thread":"`+testThread+`"}` {
+				t.Errorf("send = %s", got)
+			}
+		})
+	}
+}
