@@ -25,10 +25,13 @@ This:
 
 - generates the X25519 key pair and the mTLS client key, and stores both in the keychain (never on disk);
 - writes the config (`~/Library/Application Support/postern/config.json`, or `$POSTERN_CONFIG`), which holds no secrets;
-- pins the config: its SHA-256 goes into the keychain, and the bridge refuses to start if the file changes without a re-pin;
+- generates a key that encrypts the local inbox at rest;
+- pins the config: the SHA-256 of its path and contents goes into the keychain under the fixed `postern-pin` service, and the bridge refuses to start if the file changes without a re-pin;
 - prints the public key, its fingerprint, and a certificate signing request (CSR) for the edge.
 
 Add more sessions later with `postern session add NAME`. Only listed sessions can start the MCP server.
+
+Commands that change what the bridge trusts (`init`, `peer add/remove`, `session add/remove`, `config pin`) print the change on your terminal and ask you to type a one-time code shown there. They refuse to run without a terminal, so an agent cannot run them for you.
 
 ## 3. Exchange public keys
 
@@ -83,7 +86,7 @@ Do this once, on the same day, with both operators present.
 
 1. The operator revokes peer-b's current certificate at the edge.
 2. On machine B, `postern edge-check` must fail: requests with that certificate are blocked at the edge.
-3. A peer-b session's `send` reports the message as queued; peer-a receives nothing new.
+3. A peer-b session's `send` reports the message as queued with `relay_status: relay_auth_failed`, and its `check_inbox` reports the same; peer-a receives nothing new.
 4. The operator removes the revoked fingerprint from `relay.json` as well.
 5. Re-issue: peer-b runs `postern cert csr --new-key`, the operator issues and registers the new certificate, `postern cert import`, `postern edge-check` passes, and queued messages deliver.
 
@@ -95,7 +98,8 @@ Record the date and outcome. Repeat after any change to the edge rules.
 |---|---|
 | Client certificate leaked | Revoke it at the edge, remove its fingerprint from `relay.json`, rotate (`cert csr --new-key`). |
 | Machine lost or stolen | Revoke its certificate, remove its fingerprint, and have every peer remove its public key (`postern peer remove`, re-pin). Re-run `init --force` on the replacement machine and exchange fingerprints again. |
-| Bridge refuses to start: config pin mismatch | Something changed the config. Inspect it (relay URL, peer keys, sessions). If you made the change, `postern config pin`; if not, treat it as tampering. |
+| Bridge refuses to start: config pin mismatch | Something changed the config. Inspect it (relay URL, keychain service, peer keys, sessions). If you made the change, `postern config pin` (it asks you to type a code shown on your terminal); if not, treat it as tampering. |
+| A `postern` command asks for a confirmation code you did not expect | Something tried to change what the bridge trusts. Do not type the code; press Enter to refuse, then find out what ran it. |
 | Thread circuit breaker tripped | Read the thread first. If the loop is understood, `postern thread reset <thread>`. |
 | Relay host or edge account compromised | Content stays sealed. Rotate the edge API token and tunnel credentials, redeploy the relay, rotate client certificates. |
 

@@ -37,7 +37,10 @@ bridge  --outbound HTTPS+mTLS-->  tunnel (cloudflared)  <--outbound--  bridge
 - MCP server over stdio, configured only in the sessions that should use Postern.
 - Holds the machine's X25519 key pair and mTLS client certificate in the OS keychain (macOS Keychain first; Linux Secret Service later).
 - Each configured session launches its own `postern mcp --session NAME` process. There is no long-running daemon: every Postern process on a machine long-polls the relay and writes to one shared SQLite inbox (WAL mode, dedup by message id), so two sessions on one machine never see duplicates. Messages wait at the relay (up to 72 hours) while no session is open.
-- Refuses to start if the session name is not listed in its config, or if the config file changed since the human last ran `postern config pin` (the pin is a SHA-256 of the file, kept in the keychain).
+- Refuses to start if the session name is not listed in its config, or if the config file changed since the human last pinned it. The pin is a SHA-256 of the file's path and contents, kept under a fixed keychain service (`postern-pin`) that the config cannot name, and checked before anything else in the file is used.
+- Every command that changes what the bridge trusts (`init`, `peer add/remove`, `session add/remove`, `config pin`) shows the change on the controlling terminal and asks the human to type a one-time code printed only there. A command run by an agent's shell tool cannot see the code, and with no terminal the change is refused.
+- The local inbox is encrypted at rest (subject, body and session names sealed with a keychain-held key), so a session that reads the database file directly sees ciphertext, not untrusted text that would bypass the guard.
+- A 401/403 from the edge or relay (revoked or rotated certificate) keeps messages queued and re-reads the certificate from the keychain; `check_inbox`, `send` and `reply` report the relay status to the agent.
 - Seals outgoing messages with NaCl box (`golang.org/x/crypto/nacl/box`) to the pinned peer public key.
 - Enforces limits: 32 KB body, rate limit per session and overall, per-thread message cap with a circuit breaker.
 - Secret scanner (v0): blocks, never redacts, an outgoing `send`/`reply` whose subject or body looks like a private key, token or credential assignment. `reply` is the one path that leaves the machine, and encryption does not help if a session pastes a secret into it. The error names the rule and line, never the match.
@@ -140,7 +143,8 @@ v1 option: hardware-bound keys via `age-plugin-se` (Secure Enclave) or `age-plug
 | Malicious or confused message (prompt injection) | untrusted note in a session | session rule + PreToolUse hook (Claude Code) / approval policy (Codex) force human approval for any tool call while unread external content is in context; tags and data framing |
 | Agent-to-agent reply loop | noise, cost | per-thread cap + circuit breaker |
 | Flood / replay | noise | rate limits at bridge and relay, dedup id, 10 min timestamp window at the relay |
-| Agent edits bridge config (swap peer key or relay URL) | messages sealed to an attacker | config pin in keychain; bridge refuses to start until the human re-pins |
+| Agent edits bridge config (swap peer key, relay URL or keychain service) | messages sealed to an attacker | config pin under a fixed keychain service, bound to the file path; re-pinning needs a one-time code typed at the terminal |
+| Session reads the inbox database directly | untrusted text enters context without tainting it | inbox encrypted at rest with a keychain-held key |
 | Another process running as the same OS user runs the `postern` binary | can use the bridge's identity (keychain ACL trusts the binary) | v0: documented residual risk; sessions approve shell commands while tainted. v1 option: run the bridge as a separate OS user |
 | Relay offline | messages wait | sender keeps until acked, retries with backoff |
 | Agent reads bridge keys | key theft | keys only in keychain; bridge config holds no secrets |
