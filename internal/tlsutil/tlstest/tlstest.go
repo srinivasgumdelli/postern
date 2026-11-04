@@ -108,6 +108,36 @@ func (c *CA) ClientCert(t testing.TB, cn string) ClientCert {
 	})
 }
 
+// SignCSR issues a client certificate for a PEM CSR, the way the edge
+// does for a bridge, and returns the certificate PEM.
+func (c *CA) SignCSR(t testing.TB, csrPEM []byte) []byte {
+	t.Helper()
+	block, _ := pem.Decode(csrPEM)
+	if block == nil || block.Type != "CERTIFICATE REQUEST" {
+		t.Fatal("tlstest: not a PEM CSR")
+	}
+	csr, err := x509.ParseCertificateRequest(block.Bytes)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := csr.CheckSignature(); err != nil {
+		t.Fatal(err)
+	}
+	tmpl := &x509.Certificate{
+		SerialNumber: serial(t),
+		Subject:      csr.Subject,
+		NotBefore:    time.Now().Add(-time.Hour),
+		NotAfter:     time.Now().Add(24 * time.Hour),
+		KeyUsage:     x509.KeyUsageDigitalSignature,
+		ExtKeyUsage:  []x509.ExtKeyUsage{x509.ExtKeyUsageClientAuth},
+	}
+	der, err := x509.CreateCertificate(rand.Reader, tmpl, c.cert, csr.PublicKey, c.key)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: der})
+}
+
 func (c *CA) issue(t testing.TB, tmpl *x509.Certificate) ClientCert {
 	t.Helper()
 	key, err := tlsutil.GenerateKey()

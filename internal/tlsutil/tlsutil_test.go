@@ -52,6 +52,19 @@ func TestCSR(t *testing.T) {
 	}
 }
 
+func TestSignCSRMatchesKey(t *testing.T) {
+	ca := tlstest.NewCA(t)
+	k, _ := tlsutil.GenerateKey()
+	csr, _ := tlsutil.CreateCSR(k, "peer-a")
+	cert, err := tlsutil.ParseCertPEM(ca.SignCSR(t, csr))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !tlsutil.CertMatchesKey(cert, k) || cert.Subject.CommonName != "peer-a" {
+		t.Fatal("signed certificate does not match the CSR key")
+	}
+}
+
 func TestClientCertificateMatchAndMismatch(t *testing.T) {
 	ca := tlstest.NewCA(t)
 	a := ca.ClientCert(t, "peer-a")
