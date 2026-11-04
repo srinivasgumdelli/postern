@@ -1,0 +1,62 @@
+# Codex configuration for a session that receives Postern messages.
+#
+# This is a user-level file: ~/.codex/config.toml (or $CODEX_HOME/config.toml).
+# It has to be user-level because marking the project untrusted (below) makes
+# Codex skip the project's own .codex/ layer, including any project-local
+# config and hooks.
+#
+# Codex hooks cannot force an approval prompt, so the approval policy IS the
+# enforcement layer here. Rules:
+#
+#   * Commands must need the human's approval. Older Codex releases did this
+#     with approval_policy = "untrusted". Current releases have retired that
+#     value and refuse to start with it, so leave approval_policy unset and
+#     mark the project untrusted (the [projects] entry below). Codex then
+#     derives its strict policy ("unless-trusted": approval before running
+#     commands unless an exec-policy rule allows them).
+#   * Never approval_policy = "on-request". With on-request the model decides
+#     when to ask, so an injected message can talk it out of asking. Setting
+#     it explicitly also overrides the strict project-derived policy.
+#   * Never approval_policy = "never", --ask-for-approval never, --yolo,
+#     --dangerously-bypass-approvals-and-sandbox or --approve-for-me.
+#   * Approvals go to the human (approvals_reviewer = "user"), never to an
+#     automatic reviewer model.
+#
+# Check what a session actually got with /status, or before starting it with
+#   codex debug prompt-input | grep -o 'approval_policy[^.]*'
+# which must report `unless-trusted`.
+#
+# See docs/session-guard.md for what this does and does not cover.
+
+sandbox_mode = "workspace-write" # "read-only" is stricter still
+approvals_reviewer = "user"
+web_search = "disabled"          # hosted search runs without per-call approval
+
+[projects."/path/to/project"]
+trust_level = "untrusted"
+
+# The bridge. Every Postern tool asks except the two read tools. send and
+# reply leave the machine, so they always ask.
+[mcp_servers.postern]
+command = "/usr/local/bin/postern"
+args = ["mcp", "--session", "review"]
+default_tools_approval_mode = "prompt"
+
+[mcp_servers.postern.tools.check_inbox]
+approval_mode = "approve"
+
+[mcp_servers.postern.tools.mark_read]
+approval_mode = "approve"
+
+[mcp_servers.postern.tools.send]
+approval_mode = "prompt"
+
+[mcp_servers.postern.tools.reply]
+approval_mode = "prompt"
+
+# Every other MCP server in a session that reads Postern messages should ask
+# for every call as well, for example:
+#
+# [mcp_servers.example]
+# command = "/path/to/other-server"
+# default_tools_approval_mode = "prompt"

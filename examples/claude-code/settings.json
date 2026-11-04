@@ -1,0 +1,47 @@
+{
+  "hooks": {
+    "PreToolUse": [
+      {
+        "matcher": "*",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "'/usr/local/bin/postern' hook pre-tool-use --server postern",
+            "onFailure": "block"
+          }
+        ]
+      }
+    ],
+    "PostToolUse": [
+      {
+        "matcher": "mcp__postern__check_inbox",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "'/usr/local/bin/postern' hook post-tool-use --server postern"
+          }
+        ]
+      }
+    ],
+    "UserPromptSubmit": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "'/usr/local/bin/postern' hook user-prompt-submit --server postern"
+          }
+        ]
+      }
+    ],
+    "SessionStart": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "'/usr/local/bin/postern' hook session-start --server postern"
+          }
+        ]
+      }
+    ]
+  }
+}
