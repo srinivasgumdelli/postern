@@ -1,0 +1,193 @@
+package cli
+
+import (
+	"context"
+	"errors"
+	"flag"
+	"fmt"
+	"io"
+	"log/slog"
+	"net/http"
+	"net/url"
+	"path/filepath"
+	"time"
+
+	"postern/internal/bridge"
+	"postern/internal/guard"
+	"postern/internal/tlsutil"
+)
+
+func cmdThreadReset(ctx context.Context, env Env, args []string) error {
+	fs, cfgFlag := newFlags(env, "thread reset")
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
+	if fs.NArg() != 1 {
+		return errors.New("expected one thread id")
+	}
+	l, err := loadPinned(env, *cfgFlag)
+	if err != nil {
+		return err
+	}
+	if err := bridge.ResetThread(ctx, l.cfg.DBPath(), fs.Arg(0)); err != nil {
+		return err
+	}
+	fmt.Fprintf(env.Stdout, "Thread %s reset; its message counts start over now.\n", fs.Arg(0))
+	return nil
+}
+
+func cmdGuardInstall(env Env, args []string) error {
+	fs := flag.NewFlagSet("postern guard install", flag.ContinueOnError)
+	fs.SetOutput(env.Stderr)
+	project := fs.String("project", ".", "project directory of the Claude Code session")
+	server := fs.String("server", "postern", "name the Postern MCP server was added under")
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
+	exe, err := env.Executable()
+	if err != nil {
+		return err
+	}
+	if resolved, err := filepath.EvalSymlinks(exe); err == nil {
+		exe = resolved
+	}
+	dir, err := filepath.Abs(*project)
+	if err != nil {
+		return err
+	}
+	if err := guard.InstallClaudeCode(dir, exe, *server); err != nil {
+		return err
+	}
+	fmt.Fprintf(env.Stdout, "Installed Postern hooks in %s and the /postern-clear command.\n",
+		filepath.Join(dir, ".claude", "settings.json"))
+	fmt.Fprintln(env.Stdout, "Also add the session rule (examples/session-rule.md) to the project's CLAUDE.md, and never run this session in bypass mode.")
+	return nil
+}
+
+// cmdHook runs a Claude Code hook. Exit codes follow the hook protocol:
+// 2 blocks the tool call, so argument errors fail closed.
+func cmdHook(env Env, args []string) int {
+	if len(args) == 0 {
+		fmt.Fprintln(env.Stderr, "postern hook: missing event")
+		return 2
+	}
+	event := args[0]
+	fs := flag.NewFlagSet("postern hook", flag.ContinueOnError)
+	fs.SetOutput(env.Stderr)
+	server := fs.String("server", "postern", "Postern MCP server name")
+	stateDir := fs.String("state-dir", "", "taint marker directory (default: user config dir)")
+	if err := fs.Parse(args[1:]); err != nil {
+		return 2
+	}
+	dir := *stateDir
+	if dir == "" {
+		d, err := guard.DefaultStateDir()
+		if err != nil {
+			fmt.Fprintln(env.Stderr, "postern hook: no state dir")
+			return 2
+		}
+		dir = d
+	}
+	return guard.Run(event, env.Stdin, env.Stdout, guard.Options{StateDir: dir, ServerName: *server})
+}
+
+// cmdEdgeCheck verifies, against the live relay hostname, the properties
+// the edge must enforce. Run it after setup, after any edge change, and
+// during the revocation drill.
+func cmdEdgeCheck(ctx context.Context, env Env, args []string) error {
+	fs, cfgFlag := newFlags(env, "edge-check")
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
+	l, err := loadPinned(env, *cfgFlag)
+	if err != nil {
+		return err
+	}
+	opts, err := bridgeOptions(l, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	if err != nil {
+		return err
+	}
+	base := l.cfg.RelayURL
+	self := l.cfg.PeerName
+	other := ""
+	for _, p := range l.cfg.Peers {
+		other = p.Name
+		break
+	}
+	ownFP := tlsutil.Fingerprint(opts.ClientCert.Leaf.Raw)
+
+	noCert := edgeClient(opts, false)
+	withCert := edgeClient(opts, true)
+	pollURL := func(to string) string {
+		return base + "/v1/poll?" + url.Values{"to": {to}, "timeout": {"0"}}.Encode()
+	}
+
+	type check struct {
+		name   string
+		client *http.Client
+		url    string
+		header map[string]string
+		want   func(status int, err error) bool
+	}
+	blocked := func(status int, err error) bool { return err != nil || status == 401 || status == 403 }
+	checks := []check{
+		{"request without a client certificate is blocked", noCert, base + "/healthz", nil, blocked},
+		{"forged fingerprint header without a certificate is blocked", noCert, pollURL(self),
+			map[string]string{"X-Postern-Client-Cert-Sha256": ownFP}, blocked},
+		{"request with this bridge's certificate reaches the relay", withCert, base + "/healthz", nil,
+			func(s int, err error) bool { return err == nil && s == 200 }},
+		{"relay binds this certificate to " + self, withCert, pollURL(self), nil,
+			func(s int, err error) bool { return err == nil && s == 200 }},
+	}
+	if other != "" {
+		checks = append(checks, check{"this certificate cannot read " + other + "'s mailbox", withCert, pollURL(other), nil,
+			func(s int, err error) bool { return err == nil && s == 403 }})
+	}
+
+	failed := 0
+	for _, c := range checks {
+		status, err := edgeGet(ctx, c.client, c.url, c.header)
+		mark := "PASS"
+		if !c.want(status, err) {
+			mark = "FAIL"
+			failed++
+		}
+		detail := fmt.Sprintf("HTTP %d", status)
+		if err != nil {
+			detail = "connection refused or TLS rejected"
+		}
+		fmt.Fprintf(env.Stdout, "%s  %s (%s)\n", mark, c.name, detail)
+	}
+	if failed > 0 {
+		return fmt.Errorf("%d edge check(s) failed", failed)
+	}
+	return nil
+}
+
+func edgeClient(opts bridge.Options, withCert bool) *http.Client {
+	return &http.Client{
+		Timeout: 15 * time.Second,
+		Transport: &http.Transport{
+			Proxy:           nil,
+			TLSClientConfig: clientTLS(opts, withCert),
+		},
+		CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse },
+	}
+}
+
+func edgeGet(ctx context.Context, c *http.Client, u string, header map[string]string) (int, error) {
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, u, nil)
+	if err != nil {
+		return 0, err
+	}
+	for k, v := range header {
+		req.Header.Set(k, v)
+	}
+	resp, err := c.Do(req)
+	if err != nil {
+		return 0, err
+	}
+	defer resp.Body.Close()
+	_, _ = io.Copy(io.Discard, io.LimitReader(resp.Body, 1<<20))
+	return resp.StatusCode, nil
+}
