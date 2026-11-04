@@ -24,7 +24,7 @@
 
 ## Hosting decision
 
-The relay runs locally in Docker on machine A behind the tunnel (operator decision). The review asked for a Cloudflare Worker + Durable Object so the relay is always on; that is deferred. While machine A is off, messages wait in the sender's outbox and retry. The relay API is host-neutral, so a Worker can replace or front it later without bridge changes.
+The relay is always on: it runs locally in Docker on machine A, which stays on, behind the tunnel (operator decision). Cloudflare only carries traffic (edge mTLS, WAF, tunnel); it never stores messages, and no Worker holds data. If machine A is ever down, messages wait in the sender's outbox and retry. The relay API is host-neutral, so the host can change later without bridge changes.
 
 ## Gap fixes (decided; DESIGN.md updated to match)
 
@@ -35,7 +35,7 @@ The relay runs locally in Docker on machine A behind the tunnel (operator decisi
 5. **Config pin.** The bridge stores the SHA-256 of its config file in the keychain and refuses to start if the file changed (relay URL, peer keys, sessions) until the human runs `postern config pin`.
 6. **Keychain items are created in-process** (Security.framework), so the item ACL trusts only the bridge binary; `security find-generic-password` from another process triggers a macOS prompt.
 7. **Secret scanner in v0 (review feedback).** `send` and `reply` are blocked, not redacted, when subject or body looks like a private key, token or credential assignment. Encryption does not help if a session pastes a secret into a reply, and a human approving a long reply will not read every line. The error names the rule and line only, never the match.
-8. **Codex uses `approval_policy = "untrusted"` only** (review feedback). With `on-request` the model decides when to ask, so an injection can talk it out of asking.
+8. **Codex gets the strict approval policy only** (review feedback). With `on-request` the model decides when to ask, so an injection can talk it out of asking. Current Codex has retired `approval_policy = "untrusted"`; the equivalent is marking the project `trust_level = "untrusted"`, which yields `unless-trusted`.
 9. **Taint also clears on a fresh context.** A `SessionStart` hook with `source = "clear"` drops the marker; `compact` and `resume` keep it. The human can also clear it with the `/postern-clear` command (shipped with `disable-model-invocation: true`) or the exact prompt `postern clear`.
 10. **Residual risk, documented, not fixed in v0:** any process running as the same OS user can run the `postern` binary itself. Separate OS users for the bridge are a v1 option.
 
