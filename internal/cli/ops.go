@@ -2,6 +2,7 @@ package cli
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"flag"
 	"fmt"
@@ -10,6 +11,7 @@ import (
 	"net/http"
 	"net/url"
 	"path/filepath"
+	"strings"
 	"time"
 
 	"postern/internal/bridge"
@@ -127,28 +129,35 @@ func cmdEdgeCheck(ctx context.Context, env Env, args []string) error {
 		client *http.Client
 		url    string
 		header map[string]string
-		want   func(status int, err error) bool
+		want   func(status int, body []byte, err error) bool
 	}
-	blocked := func(status int, err error) bool { return err != nil || status == 401 || status == 403 }
+	// Blocked means stopped before the relay: a refused TLS handshake, or
+	// an edge 403 page. A JSON error from the relay itself means the
+	// request got through the edge, which is a failure here.
+	blocked := func(status int, body []byte, err error) bool {
+		return err != nil || (status == 403 && !relayError(body))
+	}
+	ok := func(s int, _ []byte, err error) bool { return err == nil && s == 200 }
+	bogusFP := strings.Repeat("0", 64)
 	checks := []check{
 		{"request without a client certificate is blocked", noCert, base + "/healthz", nil, blocked},
 		{"forged fingerprint header without a certificate is blocked", noCert, pollURL(self),
 			map[string]string{"X-Postern-Client-Cert-Sha256": ownFP}, blocked},
-		{"request with this bridge's certificate reaches the relay", withCert, base + "/healthz", nil,
-			func(s int, err error) bool { return err == nil && s == 200 }},
-		{"relay binds this certificate to " + self, withCert, pollURL(self), nil,
-			func(s int, err error) bool { return err == nil && s == 200 }},
+		{"request with this bridge's certificate reaches the relay", withCert, base + "/healthz", nil, ok},
+		{"relay binds this certificate to " + self, withCert, pollURL(self), nil, ok},
+		{"a forged fingerprint header cannot override this certificate", withCert, pollURL(self),
+			map[string]string{"X-Postern-Client-Cert-Sha256": bogusFP}, ok},
 	}
 	if other != "" {
 		checks = append(checks, check{"this certificate cannot read " + other + "'s mailbox", withCert, pollURL(other), nil,
-			func(s int, err error) bool { return err == nil && s == 403 }})
+			func(s int, body []byte, err error) bool { return err == nil && s == 403 && relayError(body) }})
 	}
 
 	failed := 0
 	for _, c := range checks {
-		status, err := edgeGet(ctx, c.client, c.url, c.header)
+		status, body, err := edgeGet(ctx, c.client, c.url, c.header)
 		mark := "PASS"
-		if !c.want(status, err) {
+		if !c.want(status, body, err) {
 			mark = "FAIL"
 			failed++
 		}
@@ -175,19 +184,27 @@ func edgeClient(opts bridge.Options, withCert bool) *http.Client {
 	}
 }
 
-func edgeGet(ctx context.Context, c *http.Client, u string, header map[string]string) (int, error) {
+func edgeGet(ctx context.Context, c *http.Client, u string, header map[string]string) (int, []byte, error) {
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, u, nil)
 	if err != nil {
-		return 0, err
+		return 0, nil, err
 	}
 	for k, v := range header {
 		req.Header.Set(k, v)
 	}
 	resp, err := c.Do(req)
 	if err != nil {
-		return 0, err
+		return 0, nil, err
 	}
 	defer resp.Body.Close()
-	_, _ = io.Copy(io.Discard, io.LimitReader(resp.Body, 1<<20))
-	return resp.StatusCode, nil
+	body, _ := io.ReadAll(io.LimitReader(resp.Body, 64<<10))
+	return resp.StatusCode, body, nil
+}
+
+// relayError reports whether body is the relay's own JSON error.
+func relayError(body []byte) bool {
+	var e struct {
+		Error string `json:"error"`
+	}
+	return json.Unmarshal(body, &e) == nil && e.Error != ""
 }
