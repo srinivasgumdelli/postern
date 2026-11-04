@@ -78,16 +78,11 @@ func bridgeOptions(l *loaded, logger *slog.Logger) (bridge.Options, error) {
 	if err != nil {
 		return bridge.Options{}, err
 	}
-	keyDER, err := l.store.Get(secrets.TLSPrivateKey)
+	inboxKey, err := loadInboxKey(l.store)
 	if err != nil {
-		return bridge.Options{}, fmt.Errorf("load client key from keychain: %w", err)
+		return bridge.Options{}, err
 	}
-	defer clear(keyDER)
-	certPEM, err := l.store.Get(secrets.TLSCertificate)
-	if err != nil {
-		return bridge.Options{}, errors.New("no client certificate imported yet (postern cert import FILE)")
-	}
-	cert, err := tlsutil.ClientCertificate(certPEM, keyDER)
+	cert, err := loadClientCert(l.store)
 	if err != nil {
 		return bridge.Options{}, err
 	}
@@ -118,11 +113,15 @@ func bridgeOptions(l *loaded, logger *slog.Logger) (bridge.Options, error) {
 		Scanner:    scan.Check,
 		Self:       c.PeerName,
 		BoxPrivate: box,
-		Peers:      peers,
-		RelayURL:   c.RelayURL,
-		ClientCert: cert,
-		RootCAs:    roots,
-		DBPath:     c.DBPath(),
+		InboxKey:   inboxKey,
+		// After a rotation the human imports a new certificate while
+		// sessions keep running; the bridge re-reads it on a 401/403.
+		ReloadClientCert: func() (tls.Certificate, error) { return loadClientCert(l.store) },
+		Peers:            peers,
+		RelayURL:         c.RelayURL,
+		ClientCert:       cert,
+		RootCAs:          roots,
+		DBPath:           c.DBPath(),
 		Limits: bridge.Limits{
 			SessionPerHour:    lim.SessionPerHour,
 			GlobalPerHour:     lim.GlobalPerHour,
@@ -132,6 +131,33 @@ func bridgeOptions(l *loaded, logger *slog.Logger) (bridge.Options, error) {
 		},
 		Logger: logger,
 	}, nil
+}
+
+func loadClientCert(store secrets.Store) (tls.Certificate, error) {
+	keyDER, err := store.Get(secrets.TLSPrivateKey)
+	if err != nil {
+		return tls.Certificate{}, fmt.Errorf("load client key from keychain: %w", err)
+	}
+	defer clear(keyDER)
+	certPEM, err := store.Get(secrets.TLSCertificate)
+	if err != nil {
+		return tls.Certificate{}, errors.New("no client certificate imported yet (postern cert import FILE)")
+	}
+	return tlsutil.ClientCertificate(certPEM, keyDER)
+}
+
+func loadInboxKey(store secrets.Store) (*[32]byte, error) {
+	b, err := store.Get(secrets.InboxKey)
+	if err != nil {
+		return nil, fmt.Errorf("load inbox key from keychain: %w", err)
+	}
+	defer clear(b)
+	if len(b) != 32 {
+		return nil, errors.New("inbox key in keychain has the wrong length")
+	}
+	var k [32]byte
+	copy(k[:], b)
+	return &k, nil
 }
 
 // clientTLS returns a TLS config for talking to the relay, with or
@@ -175,3 +201,7 @@ func (s service) CheckInbox(ctx context.Context, in mcpserver.CheckInboxInput) (
 func (s service) MarkRead(ctx context.Context, ids []string) (int, error) {
 	return s.b.MarkRead(ctx, ids)
 }
+
+// RelayStatus lets the MCP server tell the agent when the relay is
+// rejecting this bridge or unreachable.
+func (s service) RelayStatus() string { return s.b.RelayStatus() }

@@ -13,6 +13,7 @@ import (
 	"net/url"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"postern/internal/envelope"
@@ -35,11 +36,20 @@ var errBadResponse = errors.New("bridge: malformed relay response")
 // able to route traffic through a host of its choosing. It never follows
 // redirects, so a hostile or misconfigured redirect cannot move traffic
 // (or the client certificate handshake) elsewhere.
+//
+// The client certificate can be swapped (after the edge revoked or rotated
+// it). A swap builds a new transport, so every later request uses a new
+// connection with the new certificate; HTTP/2 would otherwise keep reusing
+// a connection authenticated with the old one.
 type relayClient struct {
 	base        string
-	tr          *http.Transport
-	hc          *http.Client
+	roots       *x509.CertPool
 	pollTimeout time.Duration
+
+	mu   sync.Mutex
+	cert tls.Certificate
+	tr   *http.Transport
+	hc   *http.Client
 }
 
 // parseRelayURL checks that raw is an https URL with a host and no
@@ -54,6 +64,13 @@ func parseRelayURL(raw string) (string, error) {
 }
 
 func newRelayClient(base string, cert tls.Certificate, roots *x509.CertPool, pollTimeout time.Duration) *relayClient {
+	c := &relayClient{base: base, roots: roots, pollTimeout: pollTimeout}
+	c.cert = cert
+	c.tr, c.hc = newHTTPClient(cert, roots)
+	return c
+}
+
+func newHTTPClient(cert tls.Certificate, roots *x509.CertPool) (*http.Transport, *http.Client) {
 	tr := &http.Transport{
 		Proxy: nil, // never use proxy env vars
 		DialContext: (&net.Dialer{
@@ -73,17 +90,44 @@ func newRelayClient(base string, cert tls.Certificate, roots *x509.CertPool, pol
 		ExpectContinueTimeout:  time.Second,
 		MaxResponseHeaderBytes: 64 << 10,
 	}
-	return &relayClient{
-		base: base,
-		tr:   tr,
-		hc: &http.Client{
-			Transport: tr,
-			CheckRedirect: func(*http.Request, []*http.Request) error {
-				return http.ErrUseLastResponse
-			},
+	return tr, &http.Client{
+		Transport: tr,
+		CheckRedirect: func(*http.Request, []*http.Request) error {
+			return http.ErrUseLastResponse
 		},
-		pollTimeout: pollTimeout,
 	}
+}
+
+func (c *relayClient) client() *http.Client {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.hc
+}
+
+func (c *relayClient) transport() *http.Transport {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.tr
+}
+
+func (c *relayClient) closeIdle() { c.transport().CloseIdleConnections() }
+
+// swapCert switches to cert if its leaf differs from the current one. It
+// reports whether it switched. Requests in flight finish on the old
+// transport; its idle connections are closed.
+func (c *relayClient) swapCert(cert tls.Certificate) bool {
+	c.mu.Lock()
+	if len(cert.Certificate) == 0 || cert.PrivateKey == nil ||
+		(len(c.cert.Certificate) > 0 && bytes.Equal(c.cert.Certificate[0], cert.Certificate[0])) {
+		c.mu.Unlock()
+		return false
+	}
+	old := c.tr
+	c.cert = cert
+	c.tr, c.hc = newHTTPClient(cert, c.roots)
+	c.mu.Unlock()
+	old.CloseIdleConnections()
+	return true
 }
 
 func (c *relayClient) pollSeconds() int {
@@ -101,7 +145,7 @@ func (c *relayClient) post(ctx context.Context, e envelope.Envelope) (int, error
 		return 0, err
 	}
 	req.Header.Set("Content-Type", "application/json")
-	resp, err := c.hc.Do(req)
+	resp, err := c.client().Do(req)
 	if err != nil {
 		return 0, err
 	}
@@ -129,7 +173,7 @@ func (c *relayClient) poll(ctx context.Context, to string, after int64) (pollRes
 		return pollResponse{}, 0, err
 	}
 	req.Header.Set("Accept", "application/json")
-	resp, err := c.hc.Do(req)
+	resp, err := c.client().Do(req)
 	if err != nil {
 		return pollResponse{}, 0, err
 	}
@@ -160,7 +204,7 @@ func (c *relayClient) ack(ctx context.Context, to, id string) (int, error) {
 		return 0, err
 	}
 	req.Header.Set("Content-Type", "application/json")
-	resp, err := c.hc.Do(req)
+	resp, err := c.client().Do(req)
 	if err != nil {
 		return 0, err
 	}

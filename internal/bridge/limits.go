@@ -89,12 +89,12 @@ func threadLimitReason(ctx context.Context, tx *sql.Tx, lim Limits, thread strin
 // rateLimitScope reports "session" or "global" if one more outbound
 // message would go over the hourly limit. It must run inside the
 // immediate transaction that inserts the message.
-func rateLimitScope(ctx context.Context, tx *sql.Tx, lim Limits, session string, now time.Time) (string, error) {
+func rateLimitScope(ctx context.Context, tx *sql.Tx, lim Limits, sessionTag []byte, now time.Time) (string, error) {
 	since := now.Add(-rateWindow).UnixMilli()
 	var n int
 	if err := tx.QueryRowContext(ctx,
-		`SELECT COUNT(*) FROM messages WHERE direction = 'out' AND session = ? AND created_at >= ?`,
-		session, since).Scan(&n); err != nil {
+		`SELECT COUNT(*) FROM messages WHERE direction = 'out' AND session_tag = ? AND created_at >= ?`,
+		sessionTag, since).Scan(&n); err != nil {
 		return "", err
 	}
 	if n+1 > lim.SessionPerHour {

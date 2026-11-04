@@ -90,10 +90,19 @@ type Options struct {
 	BoxPrivate *[32]byte
 	// Peers are the pinned remote peers.
 	Peers []Peer
+	// InboxKey encrypts subjects, bodies and session names in the local
+	// database (NaCl secretbox, keys derived from it). Required: Open
+	// fails if nil. It must come from the OS keychain, never a file.
+	InboxKey *[32]byte
 	// RelayURL is the relay base URL. It must be https.
 	RelayURL string
 	// ClientCert is the mTLS client certificate presented to the edge.
 	ClientCert tls.Certificate
+	// ReloadClientCert is optional. After a 401/403 from the relay (for
+	// example after the edge revoked or rotated the certificate) it is
+	// called at most once a minute; if it returns a different certificate
+	// the bridge switches to it for new connections.
+	ReloadClientCert func() (tls.Certificate, error)
 	// RootCAs verifies the relay's server certificate. nil = system roots.
 	RootCAs *x509.CertPool
 	// DBPath is the shared SQLite inbox/outbox file.
@@ -165,6 +174,16 @@ type Bridge struct {
 	nowFn     func() time.Time
 	db        *sql.DB
 	client    *relayClient
+	crypt     *inboxCrypto
+	reload    func() (tls.Certificate, error)
+
+	onceMu     sync.Mutex
+	onceLogged map[string]struct{}
+
+	statusMu      sync.Mutex
+	authFailed    bool
+	pollFailSince time.Time
+	lastReload    time.Time
 
 	mu       sync.Mutex
 	cursor   int64
@@ -193,6 +212,9 @@ func Open(opts Options) (*Bridge, error) {
 	}
 	if opts.BoxPrivate == nil {
 		return nil, errors.New("bridge: box private key is required")
+	}
+	if opts.InboxKey == nil {
+		return nil, errors.New("bridge: inbox key is required")
 	}
 	if len(opts.Peers) == 0 {
 		return nil, errors.New("bridge: at least one peer is required")
@@ -252,6 +274,20 @@ func Open(opts Options) (*Bridge, error) {
 		log.Error("open database failed", "err", safeFSError(err))
 		return nil, fmt.Errorf("bridge: cannot open database: %s", safeFSError(err))
 	}
+	crypt := newInboxCrypto(opts.InboxKey)
+	kctx, kcancel := context.WithTimeout(context.Background(), 30*time.Second)
+	err = checkInboxKey(kctx, db, crypt)
+	kcancel()
+	if err != nil {
+		db.Close()
+		crypt.wipe()
+		if errors.Is(err, errWrongKey) {
+			log.Error("open database failed", "err", err.Error())
+			return nil, fmt.Errorf("bridge: %w", err)
+		}
+		log.Error("open database failed", "err", "key check")
+		return nil, errors.New("bridge: cannot open database: database error")
+	}
 	b := &Bridge{
 		self:      opts.Self,
 		priv:      opts.BoxPrivate,
@@ -263,8 +299,12 @@ func Open(opts Options) (*Bridge, error) {
 		nowFn:     now,
 		db:        db,
 		client:    newRelayClient(base, opts.ClientCert, opts.RootCAs, pt),
+		crypt:     crypt,
+		reload:    opts.ReloadClientCert,
 		kick:      make(chan struct{}, 1),
-		closed:    make(chan struct{}),
+
+		onceLogged: map[string]struct{}{},
+		closed:     make(chan struct{}),
 	}
 	b.log.Info("bridge opened", "peer", b.self, "peers", len(peers))
 	return b, nil
@@ -280,8 +320,9 @@ func (b *Bridge) Close() error {
 		close(b.closed)
 		b.runMu.Unlock()
 		b.runWG.Wait()
-		b.client.tr.CloseIdleConnections()
+		b.client.closeIdle()
 		err = b.db.Close()
+		b.crypt.wipe()
 		b.log.Info("bridge closed")
 	})
 	return err
@@ -318,6 +359,28 @@ func (b *Bridge) Run(ctx context.Context) error {
 }
 
 func (b *Bridge) now() time.Time { return b.nowFn() }
+
+// logOnce reports whether key has not been logged before in this process
+// (bounded: the set is cleared when it gets large).
+func (b *Bridge) logOnce(key string) bool {
+	b.onceMu.Lock()
+	defer b.onceMu.Unlock()
+	if _, ok := b.onceLogged[key]; ok {
+		return false
+	}
+	if len(b.onceLogged) >= 4096 {
+		clear(b.onceLogged)
+	}
+	b.onceLogged[key] = struct{}{}
+	return true
+}
+
+// logUnreadable logs (once per id) a stored row that does not decrypt.
+func (b *Bridge) logUnreadable(id string) {
+	if b.logOnce("unreadable:" + id) {
+		b.log.Error("stored row cannot be decrypted; skipped", "id", id)
+	}
+}
 
 // Send scans, validates, limits and stores an outgoing message, then
 // tries to deliver it once. Transient delivery failures leave it queued.
@@ -478,7 +541,8 @@ func (b *Bridge) insertOutbound(ctx context.Context, o outgoing, m envelope.Mess
 			return trippedErr(o.thread, reason)
 		}
 	}
-	scope, err := rateLimitScope(ctx, tx, b.limits, o.session, now)
+	tag := b.crypt.sessionTag(o.session)
+	scope, err := rateLimitScope(ctx, tx, b.limits, tag, now)
 	if err != nil {
 		return b.internal(ctx, "rate limits", err)
 	}
@@ -497,11 +561,15 @@ func (b *Bridge) insertOutbound(ctx context.Context, o outgoing, m envelope.Mess
 			return b.internal(ctx, "insert thread", err)
 		}
 	}
+	sealed, err := b.crypt.seal(m.ID, o.session, o.subject, o.body)
+	if err != nil {
+		return b.internal(ctx, "seal outbound", err)
+	}
 	if _, err := tx.ExecContext(ctx, `
-		INSERT INTO messages (id, direction, peer, session, thread, subject, body, reply_to,
+		INSERT INTO messages (id, direction, peer, session_tag, thread, sealed, reply_to,
 			created_at, ts, state, attempts, next_attempt_at, lease_until)
-		VALUES (?, 'out', ?, ?, ?, ?, ?, ?, ?, ?, 'pending', 0, ?, ?)`,
-		m.ID, o.peer, o.session, o.thread, o.subject, o.body, nullable(o.replyTo),
+		VALUES (?, 'out', ?, ?, ?, ?, ?, ?, ?, 'pending', 0, ?, ?)`,
+		m.ID, o.peer, tag, o.thread, sealed, nullable(o.replyTo),
 		now.UnixMilli(), m.TS, now.UnixMilli(), now.Add(leaseDuration).UnixMilli()); err != nil {
 		return b.internal(ctx, "insert outbound", err)
 	}
@@ -587,7 +655,7 @@ func safeFSError(err error) string {
 	if errors.As(err, &pe) {
 		return pe.Op + ": " + pe.Err.Error()
 	}
-	if errors.Is(err, errNotRegular) || errors.Is(err, errSchemaTooNew) {
+	if errors.Is(err, errNotRegular) || errors.Is(err, errSchemaTooNew) || errors.Is(err, errSchemaV1) {
 		return err.Error()
 	}
 	return "database error"

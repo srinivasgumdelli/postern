@@ -17,11 +17,16 @@ import (
 	"postern/internal/ulid"
 )
 
-// The local database holds plaintext by design: it is this machine's
-// inbox and outbox. It lives in a 0700 directory with 0600 permissions;
-// SQLite gives the -wal and -shm files the same mode as the main file.
+// The local database is this machine's inbox and outbox. Subjects,
+// bodies and session names are sealed per row (see seal.go); routing
+// metadata (ids, peers, threads, times, states) is plain. It lives in a
+// 0700 directory with 0600 permissions; SQLite gives the -wal and -shm
+// files the same mode as the main file.
+//
+// Schema 1 (plaintext content) is refused, not migrated: nothing was
+// deployed with it.
 
-const schemaVersion = 1
+const schemaVersion = 2
 
 var schema = []string{
 	`CREATE TABLE IF NOT EXISTS messages (
@@ -29,10 +34,9 @@ var schema = []string{
 		id              TEXT    NOT NULL UNIQUE,
 		direction       TEXT    NOT NULL CHECK (direction IN ('in', 'out')),
 		peer            TEXT    NOT NULL,
-		session         TEXT    NOT NULL,
+		session_tag     BLOB,
 		thread          TEXT    NOT NULL,
-		subject         TEXT    NOT NULL,
-		body            TEXT    NOT NULL,
+		sealed          BLOB    NOT NULL,
 		reply_to        TEXT,
 		created_at      INTEGER NOT NULL,
 		ts              INTEGER NOT NULL DEFAULT 0,
@@ -43,7 +47,7 @@ var schema = []string{
 		lease_until     INTEGER NOT NULL DEFAULT 0
 	)`,
 	`CREATE INDEX IF NOT EXISTS messages_thread_created ON messages (thread, created_at)`,
-	`CREATE INDEX IF NOT EXISTS messages_dir_session_created ON messages (direction, session, created_at)`,
+	`CREATE INDEX IF NOT EXISTS messages_dir_session_created ON messages (direction, session_tag, created_at)`,
 	`CREATE INDEX IF NOT EXISTS messages_dir_created ON messages (direction, created_at)`,
 	`CREATE INDEX IF NOT EXISTS messages_outbox ON messages (state, next_attempt_at)`,
 	`CREATE TABLE IF NOT EXISTS threads (
@@ -55,12 +59,18 @@ var schema = []string{
 		tripped_at  INTEGER,
 		trip_reason TEXT
 	)`,
+	`CREATE TABLE IF NOT EXISTS meta (
+		k TEXT PRIMARY KEY,
+		v BLOB NOT NULL
+	)`,
 }
 
 var (
 	errNoDatabase   = errors.New("database does not exist")
 	errNotRegular   = errors.New("database path is not a regular file")
 	errSchemaTooNew = errors.New("database schema is newer than this binary")
+	errSchemaV1     = errors.New("database uses the old plaintext format (schema 1); move it aside and start a new one")
+	errWrongKey     = errors.New("inbox key does not match this database")
 )
 
 // dsn builds a modernc.org/sqlite DSN. Every connection gets a busy
@@ -144,6 +154,8 @@ func migrate(ctx context.Context, db *sql.DB) error {
 		return nil
 	case v > schemaVersion:
 		return errSchemaTooNew
+	case v == 1:
+		return errSchemaV1
 	}
 	for _, s := range schema {
 		if _, err := tx.ExecContext(ctx, s); err != nil {
@@ -154,6 +166,36 @@ func migrate(ctx context.Context, db *sql.DB) error {
 		return err
 	}
 	return tx.Commit()
+}
+
+// checkInboxKey proves the inbox key matches the database: the first
+// Open stores a sealed marker, later Opens must be able to open it. A
+// wrong key fails Open instead of silently hiding every row.
+func checkInboxKey(ctx context.Context, db *sql.DB, c *inboxCrypto) error {
+	tx, err := db.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	var blob []byte
+	err = tx.QueryRowContext(ctx, `SELECT v FROM meta WHERE k = 'key_check'`).Scan(&blob)
+	switch {
+	case errors.Is(err, sql.ErrNoRows):
+		sealed, err := c.seal(keyCheckID, "", "", "")
+		if err != nil {
+			return err
+		}
+		if _, err := tx.ExecContext(ctx, `INSERT INTO meta (k, v) VALUES ('key_check', ?)`, sealed); err != nil {
+			return err
+		}
+		return tx.Commit()
+	case err != nil:
+		return err
+	}
+	if _, err := c.open(keyCheckID, blob); err != nil {
+		return errWrongKey
+	}
+	return nil
 }
 
 type threadRow struct {
@@ -206,13 +248,41 @@ func (b *Bridge) threadInfo(ctx context.Context, thread string) (threadInfo, boo
 	if err != nil {
 		return threadInfo{}, false, b.internal(ctx, "load thread", err)
 	}
-	err = b.db.QueryRowContext(ctx,
-		`SELECT subject FROM messages WHERE thread = ? ORDER BY seq LIMIT 1`, thread).Scan(&ti.firstSubject)
-	if errors.Is(err, sql.ErrNoRows) {
-		return threadInfo{}, false, nil
-	}
+	// The first message whose row opens gives the subject; rows that do
+	// not open are skipped (and logged by id once).
+	rows, err := b.db.QueryContext(ctx,
+		`SELECT id, sealed FROM messages WHERE thread = ? ORDER BY seq LIMIT 20`, thread)
 	if err != nil {
 		return threadInfo{}, false, b.internal(ctx, "load thread subject", err)
+	}
+	seen, got := false, false
+	for rows.Next() {
+		var (
+			id   string
+			blob []byte
+		)
+		if err := rows.Scan(&id, &blob); err != nil {
+			rows.Close()
+			return threadInfo{}, false, b.internal(ctx, "load thread subject", err)
+		}
+		seen = true
+		rc, err := b.crypt.open(id, blob)
+		if err != nil {
+			b.logUnreadable(id)
+			continue
+		}
+		ti.firstSubject, got = rc.Subject, true
+		break
+	}
+	rows.Close()
+	if err := rows.Err(); err != nil {
+		return threadInfo{}, false, b.internal(ctx, "load thread subject", err)
+	}
+	if !seen {
+		return threadInfo{}, false, nil
+	}
+	if !got {
+		return threadInfo{}, false, fmt.Errorf("%w: messages in that thread cannot be read", errInternal)
 	}
 	err = b.db.QueryRowContext(ctx,
 		`SELECT id FROM messages WHERE thread = ? AND direction = 'in' ORDER BY seq DESC LIMIT 1`, thread).
@@ -248,10 +318,14 @@ func (b *Bridge) storeInbound(ctx context.Context, m envelope.Message) (inserted
 			return false, "", b.internal(ctx, "insert thread", err)
 		}
 	}
+	sealed, err := b.crypt.seal(m.ID, m.Session, m.Subject, m.Body)
+	if err != nil {
+		return false, "", b.internal(ctx, "seal inbound", err)
+	}
 	res, err := tx.ExecContext(ctx, `
-		INSERT OR IGNORE INTO messages (id, direction, peer, session, thread, subject, body, reply_to, created_at, ts)
-		VALUES (?, 'in', ?, ?, ?, ?, ?, ?, ?, ?)`,
-		m.ID, m.From, m.Session, m.Thread, m.Subject, m.Body, nullable(m.ReplyTo), now.UnixMilli(), m.TS)
+		INSERT OR IGNORE INTO messages (id, direction, peer, thread, sealed, reply_to, created_at, ts)
+		VALUES (?, 'in', ?, ?, ?, ?, ?, ?)`,
+		m.ID, m.From, m.Thread, sealed, nullable(m.ReplyTo), now.UnixMilli(), m.TS)
 	if err != nil {
 		return false, "", b.internal(ctx, "insert inbound", err)
 	}
@@ -312,7 +386,7 @@ func (b *Bridge) CheckInbox(ctx context.Context, q InboxQuery) ([]InboxMessage, 
 	}
 	args = append(args, limit)
 	rows, err := b.db.QueryContext(ctx, `
-		SELECT id, thread, peer, session, subject, body, created_at, read_at
+		SELECT id, thread, peer, sealed, created_at, read_at
 		FROM messages WHERE `+strings.Join(where, " AND ")+`
 		ORDER BY seq LIMIT ?`, args...)
 	if err != nil {
@@ -323,12 +397,19 @@ func (b *Bridge) CheckInbox(ctx context.Context, q InboxQuery) ([]InboxMessage, 
 	for rows.Next() {
 		var (
 			m       InboxMessage
+			blob    []byte
 			created int64
 			readAt  sql.NullInt64
 		)
-		if err := rows.Scan(&m.ID, &m.Thread, &m.FromPeer, &m.FromSession, &m.Subject, &m.Body, &created, &readAt); err != nil {
+		if err := rows.Scan(&m.ID, &m.Thread, &m.FromPeer, &blob, &created, &readAt); err != nil {
 			return nil, b.internal(ctx, "inbox scan", err)
 		}
+		rc, err := b.crypt.open(m.ID, blob)
+		if err != nil {
+			b.logUnreadable(m.ID)
+			continue
+		}
+		m.FromSession, m.Subject, m.Body = rc.Session, rc.Subject, rc.Body
 		m.ReceivedAt = time.UnixMilli(created)
 		m.Read = readAt.Valid
 		out = append(out, m)

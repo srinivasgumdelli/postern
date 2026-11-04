@@ -57,12 +57,21 @@ func (b *Bridge) attempt(ctx context.Context, r outRow) attemptResult {
 	}
 	status, err := b.client.post(ctx, e)
 	if err != nil {
+		if ctx.Err() == nil {
+			b.noteRelay(0, err, false)
+		}
 		return attemptResult{outcome: outTransient, reason: netReason(err)}
 	}
+	b.noteRelay(status, nil, false)
 	switch status {
 	case http.StatusCreated, http.StatusConflict: // 409: the relay already has this id
 		return attemptResult{outcome: outDelivered, status: status}
-	case http.StatusBadRequest, http.StatusForbidden, http.StatusRequestEntityTooLarge, http.StatusUnprocessableEntity:
+	case http.StatusUnauthorized, http.StatusForbidden:
+		// The edge refuses the client certificate (revoked, expired or
+		// rotated). Keep the message queued: it delivers once a valid
+		// certificate is in place, or gives up after Retention.
+		return attemptResult{outcome: outTransient, status: status, reason: "auth"}
+	case http.StatusBadRequest, http.StatusRequestEntityTooLarge, http.StatusUnprocessableEntity:
 		// The envelope was freshly sealed just now, so a 422 (stale) is
 		// a clock problem, not a queueing delay; retrying will not help.
 		return attemptResult{outcome: outPermanent, status: status, reason: "rejected"}
@@ -171,7 +180,7 @@ func (b *Bridge) claim(ctx context.Context, force bool, limit int) ([]outRow, er
 		}
 	}
 
-	q := `SELECT id, peer, thread, session, subject, body, COALESCE(reply_to, ''), attempts, created_at
+	q := `SELECT id, peer, thread, sealed, COALESCE(reply_to, ''), attempts, created_at
 		FROM messages
 		WHERE direction = 'out' AND state = 'pending' AND lease_until <= ?`
 	args := []any{nowMs}
@@ -186,21 +195,38 @@ func (b *Bridge) claim(ctx context.Context, force bool, limit int) ([]outRow, er
 		return nil, b.internal(ctx, "claim select", err)
 	}
 	var out []outRow
+	var unreadable []string
 	for rows.Next() {
 		var (
 			r       outRow
+			blob    []byte
 			created int64
 		)
-		if err := rows.Scan(&r.id, &r.peer, &r.thread, &r.session, &r.subject, &r.body, &r.replyTo, &r.attempts, &created); err != nil {
+		if err := rows.Scan(&r.id, &r.peer, &r.thread, &blob, &r.replyTo, &r.attempts, &created); err != nil {
 			rows.Close()
 			return nil, b.internal(ctx, "claim scan", err)
 		}
+		rc, err := b.crypt.open(r.id, blob)
+		if err != nil {
+			// A wrong key already fails Open, so this is corruption: the
+			// row can never be resealed. Fail it so it cannot block the
+			// rows behind it.
+			b.logUnreadable(r.id)
+			unreadable = append(unreadable, r.id)
+			continue
+		}
+		r.session, r.subject, r.body = rc.Session, rc.Subject, rc.Body
 		r.createdAt = time.UnixMilli(created)
 		out = append(out, r)
 	}
 	rows.Close()
 	if err := rows.Err(); err != nil {
 		return nil, b.internal(ctx, "claim rows", err)
+	}
+	for _, id := range unreadable {
+		if _, err := tx.ExecContext(ctx, `UPDATE messages SET state = 'failed', lease_until = 0 WHERE id = ?`, id); err != nil {
+			return nil, b.internal(ctx, "claim unreadable", err)
+		}
 	}
 	lease := now.Add(leaseDuration).UnixMilli()
 	for _, r := range out {

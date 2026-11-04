@@ -24,6 +24,8 @@ const (
 	// if the relay's sequence numbers were reset). Re-fetched envelopes
 	// are deduplicated by id.
 	cursorRefresh = 5 * time.Minute
+
+	reasonFuture = "future_ts"
 )
 
 // PollOnce makes one poll request, stores new inbound messages and acks
@@ -31,9 +33,12 @@ const (
 // (duplicates are not counted).
 //
 // Envelopes that are invalid, wrongly addressed, from an unknown sender,
-// undecryptable, tampered with or stale are dropped (logged by id and
-// reason only) and acked so they do not come back. Valid envelopes are
-// acked only after the insert commits.
+// undecryptable, tampered with or older than Retention are dropped (logged
+// by id and reason only) and acked so they do not come back. Valid
+// envelopes are acked only after the insert commits. An authentic
+// envelope dated more than ClockSkew ahead of this machine's clock is
+// neither stored nor acked: it is fetched again after the periodic cursor
+// reset, by which time the clock may have caught up.
 func (b *Bridge) PollOnce(ctx context.Context) (int, error) {
 	n, _, err := b.pollOnce(ctx)
 	return n, err
@@ -42,6 +47,9 @@ func (b *Bridge) PollOnce(ctx context.Context) (int, error) {
 func (b *Bridge) pollOnce(ctx context.Context) (stored, seen int, err error) {
 	after := b.cursorForPoll()
 	resp, status, err := b.client.poll(ctx, b.self, after)
+	if ctx.Err() == nil {
+		b.noteRelay(status, err, true)
+	}
 	if err != nil {
 		if ctx.Err() != nil {
 			return 0, 0, ctx.Err()
@@ -106,6 +114,16 @@ func (b *Bridge) process(ctx context.Context, raw json.RawMessage) (handled, isN
 		if err != nil {
 			return false, false
 		}
+		if reason == reasonFuture {
+			// Authentic but dated ahead of our clock: our clock probably
+			// lags. Neither store nor ack it; it stays at the relay and is
+			// fetched again after the periodic cursor reset. Treated as
+			// handled so the cursor still moves past it meanwhile.
+			if b.logOnce("future:" + id) {
+				b.log.Warn("inbound deferred", "id", id, "reason", reasonFuture)
+			}
+			return true, false
+		}
 	}
 	if reason != "" {
 		b.log.Warn("inbound dropped", "id", id, "reason", reason)
@@ -142,7 +160,11 @@ func (b *Bridge) accept(ctx context.Context, e envelope.Envelope) (reason string
 	case err != nil:
 		return "invalid_inner", false, nil
 	}
-	if err := envelope.CheckTime(m.TS, b.now(), envelope.Retention); err != nil {
+	now := b.now()
+	if time.Unix(m.TS, 0).After(now.Add(envelope.ClockSkew)) {
+		return reasonFuture, false, nil
+	}
+	if err := envelope.CheckTime(m.TS, now, envelope.Retention); err != nil {
 		return "stale", false, nil
 	}
 	inserted, drop, err := b.storeInbound(ctx, m)
@@ -164,6 +186,9 @@ func (b *Bridge) accept(ctx context.Context, e envelope.Envelope) (reason string
 // acked it, or it expired), which is fine.
 func (b *Bridge) ackEnvelope(ctx context.Context, id string) bool {
 	status, err := b.client.ack(ctx, b.self, id)
+	if ctx.Err() == nil {
+		b.noteRelay(status, err, false)
+	}
 	if err != nil {
 		if ctx.Err() == nil {
 			b.log.Warn("ack failed", "id", id, "reason", netReason(err))
