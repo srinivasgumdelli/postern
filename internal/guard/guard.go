@@ -4,14 +4,19 @@
 //
 // How it works. A PreToolUse hook sets a per-session taint marker before
 // check_inbox runs, so the marker exists before untrusted text can reach the
-// model. A PostToolUse hook drops it again only if that call returned an
-// empty inbox. While the marker is set, PreToolUse answers "ask" for every
+// model. A PostToolUse hook releases it again only if that call returned an
+// empty inbox. A session with no marker at all (for example a fork, which
+// gets a new session id and a copy of another session's history) has its
+// transcript scanned for a check_inbox call before PreToolUse decides, so
+// the guard does not depend on SessionStart having run. While the marker is
+// set, PreToolUse answers "ask" for every
 // tool except check_inbox and mark_read (Postern's own send and reply ask
 // too, with the outgoing size in the prompt), or "deny" when the session
 // runs in a permission mode that would not stop for the human. Only the
 // human clears the marker: the exact prompt "postern clear", the
-// /postern-clear command, or a fresh context (/clear). Every error path
-// fails closed.
+// /postern-clear command, or a fresh context (/clear). Clearing writes a
+// "cleared" marker rather than deleting the file, so the transcript scan
+// does not re-taint the session. Every error path fails closed.
 //
 // The guard never stores, logs or echoes message content.
 package guard
@@ -22,6 +27,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -87,6 +93,7 @@ type hookInput struct {
 	ToolName       string          `json:"tool_name"`
 	ToolInput      json.RawMessage `json:"tool_input"`
 	ToolResponse   json.RawMessage `json:"tool_response"`
+	ToolUseID      string          `json:"tool_use_id"`
 	Prompt         *string         `json:"prompt"`
 	Source         string          `json:"source"`
 }
@@ -236,7 +243,17 @@ func (g *guard) preToolUse(raw []byte, readErr error, setupErr string, w io.Writ
 
 	switch in.ToolName {
 	case g.inboxTool():
-		// Record the taint before untrusted content can enter the context.
+		// Pick up taint carried in from another session's history first,
+		// then record this call's taint before its content can enter.
+		if _, _, err := g.resolve(in); err != nil {
+			if errors.Is(err, errTranscriptUnreadable) {
+				if g.taint(in.SessionID) != nil {
+					return emit(w, preDecision(decisionDeny, reasonCannotRecord))
+				}
+			} else {
+				return emit(w, preDecision(decisionDeny, reasonCannotRecord))
+			}
+		}
 		if err := g.armBeforeInbox(in.SessionID); err != nil {
 			return emit(w, preDecision(decisionDeny, reasonCannotRecord))
 		}
@@ -245,7 +262,10 @@ func (g *guard) preToolUse(raw []byte, readErr error, setupErr string, w io.Writ
 		return 0
 	}
 
-	m, exists, err := g.st.load(in.SessionID)
+	m, exists, err := g.resolve(in)
+	if errors.Is(err, errTranscriptUnreadable) {
+		return emit(w, g.unverified(in, "the session transcript could not be read"))
+	}
 	if err != nil {
 		return emit(w, g.unverified(in, "the taint marker could not be read"))
 	}
@@ -261,6 +281,62 @@ func (g *guard) preToolUse(raw []byte, readErr error, setupErr string, w io.Writ
 		}
 	}
 	return 0
+}
+
+var errTranscriptUnreadable = errors.New("transcript unreadable")
+
+// resolve returns the session's marker, first scanning the transcript when
+// there is no marker yet (or only a "clean" one, from the offset it
+// recorded). This makes PreToolUse self-sufficient: a session whose history
+// came from elsewhere (a fork or branch gets a new session id with a copy of
+// the conversation) is tainted if that history shows a check_inbox call,
+// even when SessionStart did not run or could not write the marker. The
+// current call's own transcript line (matched by tool_use_id) is ignored.
+//
+// No transcript path, or a transcript that does not exist, leaves the
+// session untainted. A transcript that exists but cannot be read returns
+// errTranscriptUnreadable; callers fail closed.
+func (g *guard) resolve(in hookInput) (marker, bool, error) {
+	m, exists, err := g.st.load(in.SessionID)
+	if err != nil || (exists && m.State != stateClean) || in.TranscriptPath == "" {
+		return m, exists, err
+	}
+	key := pathKey(in.TranscriptPath)
+	var from int64
+	if exists && m.Transcript == key {
+		from = m.Scanned
+	}
+	found, end, serr := scanTranscript(in.TranscriptPath, in.ToolUseID, from)
+	if serr != nil {
+		if errors.Is(serr, fs.ErrNotExist) {
+			return m, exists, nil
+		}
+		return m, exists, errTranscriptUnreadable
+	}
+	if !found && exists && m.Transcript == key && end == m.Scanned {
+		return m, exists, nil // nothing new to record
+	}
+	result := m
+	uerr := g.st.update(in.SessionID, func(cur marker, ok bool) (marker, bool, bool) {
+		if ok && cur.State != stateClean {
+			result = cur // another hook set a real state meanwhile
+			return cur, true, false
+		}
+		if found {
+			result = marker{State: stateTainted, Since: g.now().Unix()}
+		} else {
+			result = marker{State: stateClean, Since: g.now().Unix(), Scanned: end, Transcript: key}
+		}
+		return result, true, true
+	})
+	if uerr != nil && found {
+		// Could not record it, but the history is tainted: gate anyway.
+		return marker{State: stateTainted}, true, nil
+	}
+	if uerr != nil {
+		return m, exists, nil
+	}
+	return result, true, nil
 }
 
 // armBeforeInbox sets the marker to pending (or counts one more pending
@@ -411,10 +487,11 @@ func (g *guard) postToolUse(raw []byte, readErr error) int {
 	}
 	empty := inboxEmpty(in.ToolResponse)
 	err := g.st.update(in.SessionID, func(m marker, exists bool) (marker, bool, bool) {
+		ungated := !exists || !m.gated()
 		switch {
-		case !exists && empty:
-			return m, false, false
-		case !exists:
+		case ungated && empty:
+			return m, exists, false
+		case ungated:
 			return marker{State: stateTainted, Since: g.now().Unix()}, true, true
 		case m.State == stateTainted:
 			return m, true, false
@@ -424,7 +501,11 @@ func (g *guard) postToolUse(raw []byte, readErr error) int {
 		}
 		m.Pending--
 		if m.Pending <= 0 {
-			return m, false, true
+			// Every check_inbox call came back empty. Record that rather
+			// than deleting the marker: the transcript now mentions
+			// check_inbox, and a missing marker would make the next
+			// PreToolUse scan it and taint the session.
+			return marker{State: stateCleared, Since: g.now().Unix()}, true, true
 		}
 		return m, true, true
 	})
@@ -437,6 +518,16 @@ func (g *guard) postToolUse(raw []byte, readErr error) int {
 		return 2
 	}
 	return 0
+}
+
+// clear records that the guard was cleared for this session. It writes a
+// "cleared" marker instead of deleting the file, so that the transcript scan
+// in PreToolUse (which would still find the old check_inbox call) does not
+// re-taint the session.
+func (g *guard) clear(sessionID string) error {
+	return g.st.update(sessionID, func(m marker, exists bool) (marker, bool, bool) {
+		return marker{State: stateCleared, Since: g.now().Unix()}, true, true
+	})
 }
 
 func (g *guard) taint(sessionID string) error {
@@ -545,9 +636,7 @@ func (g *guard) userPromptSubmit(raw []byte, readErr error, w io.Writer) int {
 		prompt = *in.Prompt
 	}
 	if isClearPrompt(prompt) {
-		err := g.st.update(in.SessionID, func(m marker, exists bool) (marker, bool, bool) {
-			return m, false, exists
-		})
+		err := g.clear(in.SessionID)
 		if err != nil {
 			return emit(w, blockOutput{Decision: "block",
 				Reason: "Postern guard could not be cleared (state error); it is still active for this session."})
@@ -603,9 +692,7 @@ func (g *guard) sessionStart(raw []byte, readErr error, w io.Writer) int {
 	switch in.Source {
 	case "clear":
 		// A fresh, empty context: nothing untrusted is in it.
-		if err := g.st.update(in.SessionID, func(m marker, exists bool) (marker, bool, bool) {
-			return m, false, exists
-		}); err != nil {
+		if err := g.clear(in.SessionID); err != nil {
 			return 2
 		}
 		return 0
@@ -623,7 +710,7 @@ func (g *guard) sessionStart(raw []byte, readErr error, w io.Writer) int {
 		if err == nil && exists && m.gated() {
 			return remind()
 		}
-		found, serr := transcriptMentions(in.TranscriptPath, "__check_inbox")
+		found, serr := transcriptMentions(in.TranscriptPath)
 		if err != nil || serr != nil || found {
 			if g.taint(in.SessionID) != nil {
 				return 2

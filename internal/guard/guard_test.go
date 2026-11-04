@@ -252,8 +252,8 @@ func TestEmptyInboxLeavesSessionUntainted(t *testing.T) {
 			if r.code != 0 || len(r.out) != 0 {
 				t.Fatalf("post must never output a decision, got %+v", r)
 			}
-			if m, ok := readMarker(t, opts, "s1"); ok {
-				t.Fatalf("empty inbox should drop the marker, still have %+v", m)
+			if m, ok := readMarker(t, opts, "s1"); !ok || m.State != stateCleared {
+				t.Fatalf("empty inbox should leave a cleared marker, got %+v (exists %v)", m, ok)
 			}
 			if r := runHook(t, opts, EventPreToolUse, preInput("s1", "Bash", "default", map[string]any{"command": "make test"})); !r.noDecision() {
 				t.Fatalf("untainted session must not be intercepted, got %+v", r)
@@ -605,7 +605,7 @@ func TestPreToolUseUnreadableMarkerAsks(t *testing.T) {
 func TestCorruptMarkerIsTreatedAsTainted(t *testing.T) {
 	for name, content := range map[string]string{
 		"garbage":       "not json",
-		"unknown state": `{"state":"clean","since":1}`,
+		"unknown state": `{"state":"trusted","since":1}`,
 		"empty":         "",
 		"huge":          strings.Repeat(" ", maxMarkerBytes+10) + `{"state":"pending"}`,
 	} {
@@ -720,8 +720,8 @@ func TestClearPromptsClearAndAreSwallowed(t *testing.T) {
 			if r.code != 0 || !r.block || r.reason != reasonCleared {
 				t.Fatalf("want block with the cleared reason, got %+v", r)
 			}
-			if _, ok := readMarker(t, opts, "s1"); ok {
-				t.Fatal("marker still present after clear")
+			if m, ok := readMarker(t, opts, "s1"); !ok || m.State != stateCleared {
+				t.Fatalf("want a cleared marker after clear, got %+v (exists %v)", m, ok)
 			}
 			if r := runHook(t, opts, EventPreToolUse, preInput("s1", "Bash", "default", nil)); !r.noDecision() {
 				t.Fatalf("after clear: want no decision, got %+v", r)
@@ -779,8 +779,8 @@ func TestSessionStartClearClearsCompactKeeps(t *testing.T) {
 	if !r.noDecision() {
 		t.Fatalf("clear: want no output, got %+v", r)
 	}
-	if _, ok := readMarker(t, opts, "s1"); ok {
-		t.Fatal("clear must remove the marker")
+	if m, ok := readMarker(t, opts, "s1"); !ok || m.State != stateCleared {
+		t.Fatalf("clear must leave a cleared marker, got %+v (exists %v)", m, ok)
 	}
 	if r := runHook(t, opts, EventSessionStart, startInput("s2", "startup", "")); !r.noDecision() {
 		t.Fatalf("untainted startup: want no output, got %+v", r)
@@ -821,24 +821,6 @@ func TestSessionStartForkInheritsTaint(t *testing.T) {
 		if !c.want && !r.noDecision() {
 			t.Errorf("%s %s: want no output, got %+v", c.source, c.transcript, r)
 		}
-	}
-}
-
-func TestReaderContainsAcrossChunks(t *testing.T) {
-	needle := []byte("__check_inbox")
-	for _, pad := range []int{0, 1, 64*1024 - 5, 64*1024 - 13, 64 * 1024, 3*64*1024 + 7} {
-		data := append(bytes.Repeat([]byte("a"), pad), needle...)
-		ok, err := readerContains(bytes.NewReader(data), needle, 1<<30)
-		if err != nil || !ok {
-			t.Fatalf("pad %d: got %v %v", pad, ok, err)
-		}
-	}
-	ok, err := readerContains(bytes.NewReader(bytes.Repeat([]byte("a"), 200000)), needle, 1<<30)
-	if err != nil || ok {
-		t.Fatalf("absent: got %v %v", ok, err)
-	}
-	if _, err := readerContains(bytes.NewReader(bytes.Repeat([]byte("a"), 100)), needle, 10); err == nil {
-		t.Fatal("over the limit should be an error")
 	}
 }
 
@@ -893,7 +875,7 @@ func TestMarkerFilesArePrivateAndContentFree(t *testing.T) {
 			t.Fatal(err)
 		}
 		for k := range fields {
-			if k != "state" && k != "since" && k != "pending" {
+			if k != "state" && k != "since" && k != "pending" && k != "scanned" && k != "transcript" {
 				t.Errorf("%s has unexpected field %q", name, k)
 			}
 		}

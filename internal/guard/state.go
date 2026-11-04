@@ -1,7 +1,6 @@
 package guard
 
 import (
-	"bufio"
 	"bytes"
 	"crypto/sha256"
 	"encoding/hex"
@@ -12,18 +11,48 @@ import (
 	"io/fs"
 	"os"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"time"
 )
 
-// Marker states. Both mean "untrusted Postern content may be in this
+// Marker states.
+//
+// "pending" and "tainted" both mean "untrusted Postern content may be in this
 // session's context" and gate tool calls the same way. "pending" is set
 // before check_inbox runs; "tainted" once a non-empty (or unverifiable)
 // result has been seen.
+//
+// "cleared" records that the human cleared the guard; "clean" records that
+// the session's transcript was scanned up to an offset and showed no
+// check_inbox call. Both are untainted. They exist so that the lazy
+// transcript scan in PreToolUse neither re-taints a cleared session nor
+// rescans a long transcript on every call. Any other state is treated as
+// tainted.
 const (
 	statePending = "pending"
 	stateTainted = "tainted"
+	stateCleared = "cleared"
+	stateClean   = "clean"
 )
+
+// The transcript scan counts a JSONL line as a check_inbox call only when
+// it holds a structural tool_use block naming an MCP check_inbox tool:
+// unescaped "type":"tool_use" and "name":"mcp__<server>__check_inbox"
+// (whitespace allowed around the colon). Tool names that appear as text,
+// such as Claude Code's deferred-tool listings or a tool result quoting a
+// name, sit inside JSON string values where every quote is escaped (\"),
+// so they do not match. A quote preceded by a backslash is never counted.
+var (
+	toolUseTypeRe = regexp.MustCompile(`(?:^|[^\\])"type"\s*:\s*"tool_use"`)
+	inboxNameRe   = regexp.MustCompile(`(?:^|[^\\])"name"\s*:\s*"mcp__[^"\\]*__check_inbox"`)
+)
+
+// maxScanLine bounds the bytes of one transcript line held for the exact
+// match. Longer lines are judged by streaming flags instead: any line that
+// contains both "tool_use" and "__check_inbox" anywhere counts (fail
+// closed).
+var maxScanLine = 1 << 20
 
 const (
 	maxMarkerBytes  = 4096
@@ -47,12 +76,25 @@ type marker struct {
 	// yet. A marker is only dropped when every one of them came back empty.
 	Pending int `json:"pending,omitempty"`
 
+	// For "clean" markers: how many bytes of the transcript have been
+	// scanned, and a hash of the transcript path they belong to.
+	Scanned    int64  `json:"scanned,omitempty"`
+	Transcript string `json:"transcript,omitempty"`
+
 	// corrupt is set by load when the file could not be parsed; update then
 	// rewrites it as a clean "tainted" record.
 	corrupt bool
 }
 
 func (m marker) gated() bool { return m.State == statePending || m.State == stateTainted }
+
+func (m marker) known() bool {
+	switch m.State {
+	case statePending, stateTainted, stateCleared, stateClean:
+		return true
+	}
+	return false
+}
 
 // store keeps one marker file per session under dir.
 type store struct {
@@ -121,7 +163,7 @@ func (s *store) load(sessionID string) (m marker, exists bool, err error) {
 	if err != nil {
 		return marker{}, false, err
 	}
-	if len(raw) > maxMarkerBytes || json.Unmarshal(raw, &m) != nil || !m.gated() {
+	if len(raw) > maxMarkerBytes || json.Unmarshal(raw, &m) != nil || !m.known() {
 		return marker{State: stateTainted, Since: s.now().Unix(), corrupt: true}, true, nil
 	}
 	if m.State == statePending && m.Pending < 1 {
@@ -137,6 +179,9 @@ func (s *store) save(sessionID string, m marker) error {
 	}
 	if m.State != statePending {
 		m.Pending = 0
+	}
+	if m.State != stateClean {
+		m.Scanned, m.Transcript = 0, ""
 	}
 	data, err := json.Marshal(m)
 	if err != nil {
@@ -238,59 +283,166 @@ func writeFileAtomic(path string, data []byte, perm os.FileMode) (err error) {
 	return os.Rename(tmpName, path)
 }
 
-// transcriptMentions reports whether the transcript file contains needle.
-// It returns an error if the file cannot be read in full; callers treat an
-// error as "may contain it". The transcript is scanned, never stored.
-func transcriptMentions(path, needle string) (bool, error) {
-	if path == "" {
-		return false, errors.New("no transcript path")
-	}
+func expandHome(path string) (string, error) {
 	if strings.HasPrefix(path, "~/") {
 		home, err := os.UserHomeDir()
 		if err != nil {
-			return false, err
+			return "", err
 		}
-		path = filepath.Join(home, path[2:])
+		return filepath.Join(home, path[2:]), nil
+	}
+	return path, nil
+}
+
+// pathKey identifies a transcript path in a "clean" marker without storing
+// the path itself.
+func pathKey(path string) string {
+	sum := sha256.Sum256([]byte(path))
+	return hex.EncodeToString(sum[:8])
+}
+
+// transcriptMentions reports whether the transcript shows a check_inbox
+// tool call. It returns an error if the file cannot be read in full; callers
+// treat an error as "may contain one". The transcript is scanned, never
+// stored.
+func transcriptMentions(path string) (bool, error) {
+	if path == "" {
+		return false, errors.New("no transcript path")
+	}
+	found, _, err := scanTranscript(path, "", 0)
+	return found, err
+}
+
+// scanTranscript reports whether any line of the transcript from byte
+// offset from onwards is a check_inbox tool call, ignoring lines that
+// contain exclude (the current call's tool_use_id, when not empty). from
+// must be a line boundary previously returned as end; it is ignored if the
+// file is now shorter. end is the offset just past the last complete line
+// read, so a line still being written is scanned again next time. A missing
+// file returns an error wrapping fs.ErrNotExist. Memory use is bounded
+// regardless of line length.
+func scanTranscript(path, exclude string, from int64) (found bool, end int64, err error) {
+	path, err = expandHome(path)
+	if err != nil {
+		return false, 0, err
 	}
 	f, err := os.Open(path)
 	if err != nil {
-		return false, err
+		return false, 0, err
 	}
 	defer f.Close()
-	return readerContains(f, []byte(needle), maxTranscriptSz)
+	fi, err := f.Stat()
+	if err != nil {
+		return false, 0, err
+	}
+	if !fi.Mode().IsRegular() {
+		return false, 0, errors.New("transcript is not a regular file")
+	}
+	if from > fi.Size() || from < 0 {
+		from = 0 // shrank or was replaced: scan it all again
+	}
+	if _, err := f.Seek(from, io.SeekStart); err != nil {
+		return false, 0, err
+	}
+	found, n, err := scanLines(f, []byte(exclude), maxTranscriptSz)
+	return found, from + n, err
 }
 
-// readerContains streams r looking for needle without loading it all into
-// memory. Reading more than limit bytes is an error.
-func readerContains(r io.Reader, needle []byte, limit int64) (bool, error) {
-	if len(needle) == 0 {
-		return true, nil
+// substrFlag tracks whether a needle occurs in a stream fed in pieces.
+type substrFlag struct {
+	needle []byte
+	tail   []byte
+	seen   bool
+}
+
+func (f *substrFlag) feed(seg []byte) {
+	if f.seen || len(f.needle) == 0 {
+		return
 	}
-	br := bufio.NewReaderSize(r, 64*1024)
-	buf := make([]byte, 0, 64*1024+len(needle))
-	chunk := make([]byte, 64*1024)
-	var total int64
+	w := append(append([]byte{}, f.tail...), seg...)
+	if bytes.Contains(w, f.needle) {
+		f.seen = true
+		return
+	}
+	keep := len(f.needle) - 1
+	if len(w) > keep {
+		w = w[len(w)-keep:]
+	}
+	f.tail = append(f.tail[:0], w...)
+}
+
+func (f *substrFlag) reset() { f.tail, f.seen = f.tail[:0], false }
+
+// scanLines streams r line by line and reports whether some line is a
+// check_inbox tool call (see toolUseTypeRe) that does not contain exclude,
+// and how many bytes up to and including the last newline were consumed.
+// Reading more than limit bytes is an error.
+func scanLines(r io.Reader, exclude []byte, limit int64) (found bool, complete int64, err error) {
+	var (
+		total    int64
+		line     []byte
+		overflow bool
+		toolUse  = &substrFlag{needle: []byte("tool_use")}
+		inbox    = &substrFlag{needle: []byte("__check_inbox")}
+		excl     = &substrFlag{needle: exclude}
+		chunk    = make([]byte, 64*1024)
+	)
+	feed := func(seg []byte) {
+		toolUse.feed(seg)
+		inbox.feed(seg)
+		excl.feed(seg)
+		if !overflow {
+			if len(line)+len(seg) > maxScanLine {
+				overflow, line = true, line[:0]
+			} else {
+				line = append(line, seg...)
+			}
+		}
+	}
+	endLine := func() bool {
+		var hit bool
+		switch {
+		case excl.seen:
+			hit = false
+		case overflow:
+			hit = toolUse.seen && inbox.seen
+		default:
+			hit = toolUseTypeRe.Match(line) && inboxNameRe.Match(line)
+		}
+		line, overflow = line[:0], false
+		toolUse.reset()
+		inbox.reset()
+		excl.reset()
+		return hit
+	}
 	for {
-		n, err := br.Read(chunk)
-		if n > 0 {
-			total += int64(n)
-			if total > limit {
-				return false, errors.New("transcript too large to scan")
+		n, rerr := r.Read(chunk)
+		data := chunk[:n]
+		for len(data) > 0 {
+			nl := bytes.IndexByte(data, '\n')
+			if nl < 0 {
+				feed(data)
+				total += int64(len(data))
+				break
 			}
-			buf = append(buf, chunk[:n]...)
-			if bytes.Contains(buf, needle) {
-				return true, nil
+			feed(data[:nl])
+			total += int64(nl + 1)
+			if endLine() {
+				return true, total, nil
 			}
-			// Keep only the tail that could start a match spanning chunks.
-			if keep := len(needle) - 1; len(buf) > keep {
-				buf = append(buf[:0], buf[len(buf)-keep:]...)
-			}
+			complete = total
+			data = data[nl+1:]
 		}
-		if err == io.EOF {
-			return false, nil
+		if total > limit {
+			return false, complete, errors.New("transcript too large to scan")
 		}
-		if err != nil {
-			return false, err
+		if rerr == io.EOF {
+			// A final line without a newline may still be being written;
+			// it counts now but is rescanned next time.
+			return endLine(), complete, nil
+		}
+		if rerr != nil {
+			return false, complete, rerr
 		}
 	}
 }
