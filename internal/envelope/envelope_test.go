@@ -4,6 +4,7 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"errors"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -91,7 +92,7 @@ func TestOpenTamperedBoxFails(t *testing.T) {
 	}
 	sealed, _ := base64.StdEncoding.DecodeString(e.Box)
 	for _, i := range []int{0, len(sealed) / 2, len(sealed) - 1} {
-		c := append([]byte(nil), sealed...)
+		c := slices.Clone(sealed)
 		c[i] ^= 0x01
 		te := e
 		te.Box = base64.StdEncoding.EncodeToString(c)
@@ -266,6 +267,10 @@ func TestKeyEncodingAndFingerprint(t *testing.T) {
 	}
 	if _, err := DecodeKey(base64.StdEncoding.EncodeToString(make([]byte, 31))); err == nil {
 		t.Fatal("short key accepted")
+	}
+	derived, err := PublicKey(p.priv)
+	if err != nil || *derived != *p.pub {
+		t.Fatalf("PublicKey does not match generated key: %v", err)
 	}
 	fp := Fingerprint(p.pub)
 	if len(fp) != 8*4+7 || strings.Count(fp, " ") != 7 {

@@ -22,6 +22,7 @@ import (
 	"unicode"
 	"unicode/utf8"
 
+	"golang.org/x/crypto/curve25519"
 	"golang.org/x/crypto/nacl/box"
 
 	"postern/internal/ulid"
@@ -299,6 +300,20 @@ func CheckTime(ts int64, now time.Time, maxAge time.Duration) error {
 // GenerateKey returns a new X25519 key pair for sealing.
 func GenerateKey() (pub, priv *[KeySize]byte, err error) {
 	return box.GenerateKey(rand.Reader)
+}
+
+// PublicKey derives the X25519 public key for a private key.
+func PublicKey(priv *[KeySize]byte) (*[KeySize]byte, error) {
+	if priv == nil {
+		return nil, invalid("missing key")
+	}
+	b, err := curve25519.X25519(priv[:], curve25519.Basepoint)
+	if err != nil {
+		return nil, invalid("key")
+	}
+	var pub [KeySize]byte
+	copy(pub[:], b)
+	return &pub, nil
 }
 
 // EncodeKey returns the standard base64 form of a key.
