@@ -1,0 +1,273 @@
+# Edge and relay setup
+
+How the operator puts the relay on the internet: a Cloudflare Tunnel to a relay that publishes no ports, with client certificates (mTLS) enforced at the edge for one dedicated hostname. Bridge-side steps (CSR, `cert import`, `edge-check`) are in [operations.md](operations.md).
+
+Placeholders used throughout. Replace them at deploy time; never commit real values.
+
+| Placeholder | Meaning |
+|---|---|
+| `postern.example.com` | the dedicated relay hostname, a subdomain of a zone you own |
+| `<ZONE_ID>` | that zone's id (dashboard, zone overview) |
+| `<TUNNEL_UUID>` | the tunnel id printed by `cloudflared tunnel create` |
+| `<PEER_A_CERT_SHA256>`, `<PEER_B_CERT_SHA256>` | SHA-256 fingerprints of each bridge's client certificate |
+| `<CERT_ID>` | the edge's id for an issued client certificate (needed to revoke it) |
+
+Items marked **(verify against current Cloudflare docs)** could not be confirmed against Cloudflare's documentation when this was written. Check them before relying on them. The verification checklist at the end tests the parts that matter on the real edge.
+
+## How the pieces fit
+
+```
+bridge --HTTPS + client cert--> edge (postern.example.com)
+                                  1. mTLS handshake against the Cloudflare-managed CA
+                                  2. WAF: block unless cert verified and not revoked
+                                  3. transform: SET X-Postern-Client-Cert-Sha256 = cert fingerprint
+                                  |
+                          tunnel (cloudflared dials out from the relay host)
+                                  |
+                          relay (Docker, internal network only, no published ports)
+                                  maps the fingerprint to a peer name; 401/403 otherwise
+```
+
+The relay runs in `identity: "header"` mode: it trusts the `X-Postern-Client-Cert-Sha256` header. **That is safe only because the relay is reachable solely through the tunnel.** `docker-compose.yml` publishes no ports, puts the relay on an `internal: true` network shared only with `cloudflared`, and `cmd/postern-relay/compose_test.go` fails if that changes. Never publish the relay's port, never attach it to another network, never add a second ingress route to it. Anyone who can reach the relay directly can claim any identity by sending the header.
+
+## 1. Relay host files
+
+On the relay host (machine A), in the repo checkout:
+
+```sh
+cp deploy/relay.example.json deploy/relay.json
+cp deploy/cloudflared/config.example.yml deploy/cloudflared/config.yml
+mkdir -m 0700 -p deploy/secrets
+```
+
+These real files are gitignored. `deploy/relay.json` holds certificate fingerprints, which are not secret. The relay refuses to start while it still contains the `<PEER_..._CERT_SHA256>` placeholders; you fill them in at step 6.
+
+## 2. Tunnel
+
+Use a locally managed tunnel with a credentials file (the compose file mounts it as a secret).
+
+```sh
+cloudflared tunnel login                 # browser login; writes an account certificate to ~/.cloudflared/cert.pem
+cloudflared tunnel create postern        # prints <TUNNEL_UUID>; writes ~/.cloudflared/<TUNNEL_UUID>.json
+cloudflared tunnel route dns postern postern.example.com
+```
+
+Then:
+
+```sh
+mv ~/.cloudflared/<TUNNEL_UUID>.json deploy/secrets/tunnel-credentials.json
+chmod 0400 deploy/secrets/tunnel-credentials.json
+```
+
+- Edit `deploy/cloudflared/config.yml`: set `tunnel: <TUNNEL_UUID>` and the hostname. The ingress has exactly two rules: the hostname to `http://relay:8080`, then `http_status:404`.
+- The pinned `cloudflared` image runs as `65532:65532` (check with `docker image inspect -f '{{.Config.User}}'` after an upgrade). On a Linux host the credentials file must be readable by that user and nobody else: `sudo chown 65532:65532 deploy/secrets/tunnel-credentials.json`. Docker Desktop maps file ownership differently; check that the tunnel starts.
+- `~/.cloudflared/cert.pem` can create and delete tunnels for the whole account. Remove it once the tunnel exists, and log in again only when you need to change tunnels (verify against current Cloudflare docs that a credentials-file tunnel runs without it).
+- Make sure the hostname's only DNS record is the tunnel CNAME (`<TUNNEL_UUID>.cfargotunnel.com`, proxied). No A/AAAA records pointing at the relay host.
+
+## 3. Edge API token, kept in the keychain
+
+Create an API token in the dashboard (My Profile, API Tokens, Create Custom Token):
+
+- Permission: **Zone, SSL and Certificates, Edit** (the API reference calls it "SSL and Certificates Write").
+- Zone resources: **Include, Specific zone**, the one zone that holds `postern.example.com`. No other zones, no account permissions.
+- Optionally restrict client IP addresses and set an expiry.
+
+Store it in the operator's login keychain. With `-w` last, `security` prompts for the value, so the token never appears in argv, shell history or the environment:
+
+```sh
+security add-generic-password -a operator -s postern-edge-token -w
+```
+
+Every API call below reads the token from the keychain and pipes the `Authorization` header into `curl` on stdin (`-H @-`, curl 7.55 or later). The token is never an argument, never an environment variable, never in a file:
+
+```sh
+cfapi() {
+  security find-generic-password -s postern-edge-token -w \
+    | sed 's/^/Authorization: Bearer /' \
+    | curl -sS --fail-with-body -H @- "$@"
+}
+```
+
+Because stdin carries the header, request bodies are passed as files (`--data-binary @file`). They contain only CSRs and hostnames, nothing secret.
+
+## 4. Enable mTLS for the one hostname
+
+Dashboard: SSL/TLS, Client Certificates, Hosts, Edit, add `postern.example.com`.
+
+Or the API (no `mtls_certificate_id` means the Cloudflare-managed CA). Note that `PUT` replaces the whole list, so include every hostname that should keep mTLS:
+
+```sh
+printf '{"hostnames":["postern.example.com"]}' > hosts.json
+cfapi -X PUT "https://api.cloudflare.com/client/v4/zones/<ZONE_ID>/certificate_authorities/hostname_associations" \
+  -H 'Content-Type: application/json' --data-binary @hosts.json
+```
+
+Also, for the zone or hostname: minimum TLS version 1.2 or later. Enabling mTLS for the host only makes the edge *ask* for a certificate. The WAF rule in step 7 is what blocks requests without one.
+
+## 5. Issue a client certificate per bridge
+
+Each bridge prints a CSR (`postern init` or `postern cert csr`); the private key never leaves that machine's keychain. Copy the CSR to the operator, for example as `peer-a.csr`. Then:
+
+```sh
+jq -n --rawfile csr peer-a.csr '{csr: $csr, validity_days: 14}' > peer-a-req.json
+cfapi -X POST "https://api.cloudflare.com/client/v4/zones/<ZONE_ID>/client_certificates" \
+  -H 'Content-Type: application/json' --data-binary @peer-a-req.json > peer-a-resp.json
+jq -r '.result.certificate' peer-a-resp.json > peer-a.pem
+jq -r '.result.id, .result.fingerprint_sha256, .result.expires_on' peer-a-resp.json   # note <CERT_ID>
+```
+
+- Validity is about 14 days and certificates rotate weekly (one week of overlap). Whether the API enforces a minimum or maximum `validity_days`: verify against current Cloudflare docs.
+- A zone can hold up to 100 active certificates from the Cloudflare-managed CA. Revoked ones do not count.
+- Compute the fingerprint yourself; it must match what `postern cert import peer-a.pem` prints on the bridge:
+
+  ```sh
+  openssl x509 -in peer-a.pem -outform DER | shasum -a 256 | cut -d' ' -f1
+  ```
+
+- Return `peer-a.pem` to the bridge's operator (it is public), keep `<CERT_ID>` for revocation, and delete the request and response files.
+
+Repeat for `peer-b`.
+
+### Revoke
+
+```sh
+cfapi -X DELETE "https://api.cloudflare.com/client/v4/zones/<ZONE_ID>/client_certificates/<CERT_ID>"
+```
+
+Revocation is asynchronous: the status moves from `pending_revocation` to `revoked`. How quickly the edge enforces it: verify against current Cloudflare docs, and measure it during the revocation drill ([operations.md](operations.md)). Then remove that fingerprint from `relay.json` and restart the relay, so the relay rejects it too.
+
+List certificates (to audit, or to find a `<CERT_ID>`):
+
+```sh
+cfapi "https://api.cloudflare.com/client/v4/zones/<ZONE_ID>/client_certificates" \
+  | jq -r '.result[] | [.id, .status, .common_name, .expires_on, .fingerprint_sha256] | @tsv'
+```
+
+(Filter and pagination parameters: verify against current Cloudflare docs.)
+
+## 6. Put the fingerprints in relay.json
+
+```json
+{
+  "listen": ":8080",
+  "db": "/data/relay.db",
+  "identity": "header",
+  "fingerprint_header": "X-Postern-Client-Cert-Sha256",
+  "peers": {
+    "peer-a": ["<PEER_A_CERT_SHA256>"],
+    "peer-b": ["<PEER_B_CERT_SHA256>"]
+  },
+  "posts_per_hour": 120,
+  "max_queued_per_peer": 1000
+}
+```
+
+- Fingerprints are 64 hex characters. Case, colons and spaces are normalized. A fingerprint may belong to only one peer.
+- During rotation a peer lists two fingerprints (old and new); remove the old one once the bridge has switched.
+- The relay reads the file only at start: `docker compose restart relay` after every change.
+
+Do not start the stack yet. Until the WAF rule and the transform rule (steps 7 and 8) are live, a request without a certificate, or with a client-chosen fingerprint header, would reach the relay.
+
+## 7. WAF custom rule
+
+Security, WAF, Custom rules, Create rule:
+
+- Expression:
+
+  ```
+  (http.host eq "postern.example.com" and (not cf.tls_client_auth.cert_verified or cf.tls_client_auth.cert_revoked))
+  ```
+
+- Action: **Block**.
+
+Both conditions are needed: `cert_verified` is still true for a valid certificate that has been revoked. The free plan has a small number of custom rules (verify against current Cloudflare docs). This rule must stay enabled and scoped to this hostname.
+
+## 8. Transform rule: set the fingerprint header
+
+Rules, Transform Rules, Modify Request Header, Create rule:
+
+- When: custom filter expression `http.host eq "postern.example.com"`.
+- Then: **Set dynamic**, header name `X-Postern-Client-Cert-Sha256`, value `cf.tls_client_auth.cert_fingerprint_sha256`.
+
+"Set" overwrites any value the client sent, so a client cannot choose its own identity. When there is no client certificate the field is empty, and a header set to an empty value is removed, so the relay sees no identity (401). The field holds 64 lowercase hex characters. Whether the `cf.tls_client_auth.*` fields are usable in transform rules on your plan: verify against current Cloudflare docs. Checklist items 4 and 5 below prove it works.
+
+Request header transform rules run in the `http_request_late_transform` phase. Where that sits relative to WAF custom rules does not matter here: the WAF blocks no-certificate requests either way, and the header always comes from the edge.
+
+## 9. Start
+
+Only after steps 7 and 8 are deployed:
+
+```sh
+docker compose up -d --build
+docker compose ps
+```
+
+Then run the verification checklist below.
+
+## Weekly rotation
+
+1. The bridge makes a new key and CSR (`postern cert csr --new-key`).
+2. Issue a certificate from it (step 5).
+3. Add the new fingerprint next to the old one in `relay.json`, then `docker compose restart relay`.
+4. The bridge imports the certificate and checks it (`postern cert import`, `postern edge-check`).
+5. Remove the old fingerprint, restart the relay, and revoke the old certificate.
+
+## Verification checklist
+
+Run all of it before the first real peer connects, and again after any edge change. Use a throwaway certificate, so no bridge key has to leave a keychain:
+
+```sh
+openssl ecparam -genkey -name prime256v1 -noout -out edge-test-key.pem
+openssl req -new -key edge-test-key.pem -subj /CN=edge-test -out edge-test.csr
+# issue it as in step 5 -> edge-test.pem, and note its <CERT_ID>
+```
+
+An edge rejection is Cloudflare's HTML block page. A relay rejection is JSON like `{"error":"forbidden"}`.
+
+1. **No certificate is blocked at the edge.** Expect 403 with the HTML block page:
+
+   ```sh
+   curl -sS -o /dev/null -w '%{http_code}\n' https://postern.example.com/healthz
+   ```
+
+2. **A forged header without a certificate is still blocked at the edge.** Expect 403 HTML:
+
+   ```sh
+   curl -sS -w '\n%{http_code}\n' -H 'X-Postern-Client-Cert-Sha256: <PEER_A_CERT_SHA256>' \
+     'https://postern.example.com/v1/poll?to=peer-a&timeout=0'
+   ```
+
+3. **With a certificate, `/healthz` is 200.** Expect `ok`:
+
+   ```sh
+   curl -sS --cert edge-test.pem --key edge-test-key.pem https://postern.example.com/healthz
+   ```
+
+4. **The relay enforces the fingerprint.** The test certificate is not in `relay.json`. Expect `{"error":"forbidden"}` (403 from the relay):
+
+   ```sh
+   curl -sS --cert edge-test.pem --key edge-test-key.pem 'https://postern.example.com/v1/poll?to=peer-a&timeout=0'
+   ```
+
+5. **The edge overwrites a client-sent header.** Same certificate, now also claiming peer-a's fingerprint. Expect `{"error":"forbidden"}` again. A 200 here means the transform rule is not overwriting the header: stop and fix it.
+
+   ```sh
+   curl -sS --cert edge-test.pem --key edge-test-key.pem -H 'X-Postern-Client-Cert-Sha256: <PEER_A_CERT_SHA256>' \
+     'https://postern.example.com/v1/poll?to=peer-a&timeout=0'
+   ```
+
+6. **Revocation cuts the certificate off at the edge.** Revoke the test certificate (step 5, Revoke), wait for `revoked`, and repeat item 3. Expect 403 HTML. Then delete `edge-test-key.pem`, `edge-test.csr` and `edge-test.pem`.
+
+7. **The relay container publishes no ports.** On the relay host:
+
+   ```sh
+   docker compose ps                                   # PORTS column empty for relay and cloudflared
+   docker port postern-relay-1                         # prints nothing
+   docker inspect -f '{{json .NetworkSettings.Ports}}' postern-relay-1    # {} or only unpublished entries
+   docker network inspect -f '{{.Internal}}' postern_relay-internal       # true
+   curl -m 3 http://127.0.0.1:8080/healthz             # must fail: nothing listens on the host
+   ```
+
+8. **Real bridges work end to end.** On each machine, `postern edge-check` succeeds.
+
+9. **Logs carry no content.** `docker compose logs relay` shows method, route, status, bytes, duration and peer only. No query strings, no bodies, no client addresses.
