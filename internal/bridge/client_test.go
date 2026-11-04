@@ -31,11 +31,11 @@ func TestTransportIgnoresProxyEnv(t *testing.T) {
 	o.RelayURL = "https://relay.test:" + port
 	a := w.open(o)
 
-	if a.client.tr.Proxy != nil {
+	if a.client.transport().Proxy != nil {
 		t.Fatal("transport has a proxy function")
 	}
 	real := relay.srv.Listener.Addr().String()
-	a.client.tr.DialContext = func(ctx context.Context, network, addr string) (net.Conn, error) {
+	a.client.transport().DialContext = func(ctx context.Context, network, addr string) (net.Conn, error) {
 		if addr == "relay.test:"+port {
 			addr = real
 		}

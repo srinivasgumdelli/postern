@@ -3,6 +3,7 @@ package bridge
 import (
 	"bytes"
 	"context"
+	"crypto/rand"
 	"crypto/tls"
 	"encoding/json"
 	"errors"
@@ -132,6 +133,7 @@ type fakeRelay struct {
 	storeFail bool   // store the post, then answer 503 (lost response)
 	redirect  string // answer posts with 307 to this URL
 	ackCode   int    // forced status for acks (0 = normal)
+	revoked   map[string]bool
 	notify    chan struct{}
 	stop      chan struct{}
 	stopOnce  sync.Once
@@ -146,14 +148,15 @@ type storedEnv struct {
 func newFakeRelay(t testing.TB, ca *tlstest.CA, clock *testClock, hosts ...string) *fakeRelay {
 	t.Helper()
 	f := &fakeRelay{
-		t:      t,
-		clock:  clock,
-		idents: map[string]string{},
-		boxes:  map[string][]storedEnv{},
-		seen:   map[string]bool{},
-		acked:  map[string]bool{},
-		notify: make(chan struct{}),
-		stop:   make(chan struct{}),
+		t:       t,
+		clock:   clock,
+		idents:  map[string]string{},
+		boxes:   map[string][]storedEnv{},
+		seen:    map[string]bool{},
+		acked:   map[string]bool{},
+		revoked: map[string]bool{},
+		notify:  make(chan struct{}),
+		stop:    make(chan struct{}),
 	}
 	f.srv = httptest.NewUnstartedServer(f)
 	f.srv.EnableHTTP2 = true
@@ -180,6 +183,14 @@ func (f *fakeRelay) bind(fingerprint, peer string) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.idents[tlsutil.NormalizeFingerprint(fingerprint)] = peer
+}
+
+// revoke makes the edge refuse a certificate with 403, as after a
+// revocation.
+func (f *fakeRelay) revoke(fingerprint string, v bool) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.revoked[tlsutil.NormalizeFingerprint(fingerprint)] = v
 }
 
 func (f *fakeRelay) setOffline(v bool) {
@@ -267,6 +278,15 @@ func (f *fakeRelay) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	if offline {
 		writeJSON(w, http.StatusServiceUnavailable, map[string]string{"error": "unavailable"})
 		return
+	}
+	if r.TLS != nil && len(r.TLS.PeerCertificates) > 0 {
+		f.mu.Lock()
+		rev := f.revoked[tlsutil.Fingerprint(r.TLS.PeerCertificates[0].Raw)]
+		f.mu.Unlock()
+		if rev {
+			writeJSON(w, http.StatusForbidden, map[string]string{"error": "revoked"})
+			return
+		}
 	}
 	peer := f.identity(r)
 	if peer == "" {
@@ -434,6 +454,7 @@ type identity struct {
 	name      string
 	pub, priv *[32]byte
 	cert      tlstest.ClientCert
+	inboxKey  *[32]byte
 }
 
 // world is a CA, a clock, a fake relay and two peers bound to it.
@@ -451,7 +472,11 @@ func newIdentity(t *testing.T, ca *tlstest.CA, name string) identity {
 	if err != nil {
 		t.Fatal(err)
 	}
-	return identity{name: name, pub: pub, priv: priv, cert: ca.ClientCert(t, name)}
+	var k [32]byte
+	if _, err := rand.Read(k[:]); err != nil {
+		t.Fatal(err)
+	}
+	return identity{name: name, pub: pub, priv: priv, cert: ca.ClientCert(t, name), inboxKey: &k}
 }
 
 func newWorld(t *testing.T) *world {
@@ -482,6 +507,7 @@ func (w *world) options(self identity, dbPath string, peers ...identity) Options
 		Scanner:     testScanner,
 		Self:        self.name,
 		BoxPrivate:  self.priv,
+		InboxKey:    self.inboxKey,
 		Peers:       ps,
 		RelayURL:    w.relay.URL(),
 		ClientCert:  self.cert.TLS,

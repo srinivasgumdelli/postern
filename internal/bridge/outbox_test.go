@@ -58,7 +58,7 @@ func TestOutboxResealsAfterStaleWindow(t *testing.T) {
 }
 
 func TestPermanentRejection(t *testing.T) {
-	for _, code := range []int{400, 403, 413, 422} {
+	for _, code := range []int{400, 413, 422} {
 		t.Run(fmt.Sprint(code), func(t *testing.T) {
 			w := newWorld(t)
 			a, _ := w.pair()
@@ -89,7 +89,7 @@ func TestPermanentRejection(t *testing.T) {
 }
 
 func TestTransientStatusesQueue(t *testing.T) {
-	for _, code := range []int{429, 500, 502, 503, 401, 404} {
+	for _, code := range []int{429, 500, 502, 503, 401, 403, 404} {
 		t.Run(fmt.Sprint(code), func(t *testing.T) {
 			w := newWorld(t)
 			a, b := w.pair()

@@ -38,6 +38,20 @@ func countRows(t *testing.T, b *Bridge, where string, args ...any) int {
 	return n
 }
 
+// storedContent opens a stored row's sealed content.
+func storedContent(t *testing.T, b *Bridge, id string) rowContent {
+	t.Helper()
+	var blob []byte
+	if err := b.db.QueryRow(`SELECT sealed FROM messages WHERE id = ?`, id).Scan(&blob); err != nil {
+		t.Fatal(err)
+	}
+	rc, err := b.crypt.open(id, blob)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return rc
+}
+
 func rowState(t *testing.T, b *Bridge, id string) string {
 	t.Helper()
 	var s string
@@ -79,6 +93,7 @@ func TestOpenValidation(t *testing.T) {
 		"no peer key":     func(o *Options) { o.Peers[0].PublicKey = nil },
 		"no peers":        func(o *Options) { o.Peers = nil },
 		"no box key":      func(o *Options) { o.BoxPrivate = nil },
+		"no inbox key":    func(o *Options) { o.InboxKey = nil },
 		"no db path":      func(o *Options) { o.DBPath = "" },
 		"negative limit":  func(o *Options) { o.Limits.ThreadMax = -1 },
 		"negative poll":   func(o *Options) { o.PollTimeout = -time.Second },
@@ -362,10 +377,7 @@ func TestReply(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	var subj string
-	if err := b.db.QueryRow(`SELECT subject FROM messages WHERE id = ?`, lr.ID).Scan(&subj); err != nil {
-		t.Fatal(err)
-	}
+	subj := storedContent(t, b, lr.ID).Subject
 	if len(subj) > envelope.MaxSubjectBytes || !utf8.ValidString(subj) || !strings.HasPrefix(subj, "Re: "+plainMarker) {
 		t.Fatalf("long reply subject: %d bytes, valid=%v", len(subj), utf8.ValidString(subj))
 	}
@@ -705,7 +717,7 @@ func TestLogsContainNoContent(t *testing.T) {
 	w.relay.setOffline(false)
 	_, _ = a.FlushOutbox(ctx)
 	_, _ = a.Send(ctx, sess1, SendRequest{To: "peer-b", Subject: subject, Body: body}) // rate limited
-	w.relay.setPostCode(403)
+	w.relay.setPostCode(422)
 	_, _ = a.Send(ctx, sess2, SendRequest{To: "peer-b", Subject: subject, Body: body}) // rejected
 	w.relay.setPostCode(0)
 	bad := sealFrom(t, w.a, "peer-b", w.b.pub, w.clock.Now(), nil)

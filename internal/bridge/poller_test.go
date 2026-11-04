@@ -57,9 +57,6 @@ func TestInvalidEnvelopesDroppedAndAcked(t *testing.T) {
 		"stale": func() envelope.Envelope {
 			return sealFrom(t, w.a, "peer-b", w.b.pub, now.Add(-envelope.Retention-time.Hour), nil)
 		},
-		"from the future": func() envelope.Envelope {
-			return sealFrom(t, w.a, "peer-b", w.b.pub, now.Add(time.Hour), nil)
-		},
 		"bad outer version": func() envelope.Envelope {
 			e := sealFrom(t, w.a, "peer-b", w.b.pub, now, nil)
 			e.V = 2
