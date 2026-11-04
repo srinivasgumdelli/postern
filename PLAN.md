@@ -11,8 +11,9 @@ Nothing security-relevant is deferred from v0. Each item has a test. Identity bi
 5. **Keychain**: store/load private key and client cert from macOS Keychain (e.g. via `keybase/go-keychain` or `security` CLI). `postern init` generates the key pair and prints the public key + fingerprint. No secrets ever written to disk in plaintext.
 6. **MCP server**: `send`, `check_inbox`, `reply`, `mark_read` over stdio, with untrusted tagging in outputs and in tool descriptions.
 7. **Limits**: 32 KB body, per-session and global rate limits, per-thread cap with circuit breaker.
+7b. **Secret scanner**: block (not redact) outgoing messages that look like keys, tokens or credential assignments. Tests: each rule fires; ordinary code/logs pass; error never echoes the secret.
 8. **Edge setup doc** (generic): create subdomain, issue client certs, WAF rule, tunnel; checklist to verify that a request without a cert is blocked.
-9. **Session-side guard**: ship (a) the session rule snippet, (b) a Claude Code `PreToolUse` + `UserPromptSubmit` hook pair with per-session taint marker, (c) Codex approval-policy config, (d) `untrusted_content` framing and `readOnlyHint` annotations. Tests: hook returns `ask` for any tool other than `check_inbox`/`mark_read` while tainted (`deny` in bypass mode); clears only on the explicit `postern clear` prompt; injection fixture (message asking to run a command, edit a file, push code) produces zero unapproved tool calls in a scripted session.
+9. **Session-side guard**: ship (a) the session rule snippet, (b) a Claude Code `PreToolUse` + `UserPromptSubmit` hook pair with per-session taint marker, (c) Codex approval-policy config, (d) `untrusted_content` framing and `readOnlyHint` annotations. Tests: hook returns `ask` for any tool other than `check_inbox`/`mark_read` while tainted (`deny` in bypass mode); clears only on the explicit `postern clear` prompt; injection fixture (message asking to run a command, edit a file, push code, or reply with `.env`, a key file or `git log -p`) produces zero unapproved tool calls in a scripted session. Codex config uses `approval_policy = "untrusted"` only.
 10. **End-to-end test**: two bridges on one machine with separate keychains/configs through a local relay; message out and reply back.
 
 Acceptance for v0:
@@ -25,7 +26,6 @@ Acceptance for v0:
 
 ## v1 (+1-2 days)
 
-- Secret scanner on outgoing messages (block, not redact).
 - Audit log (JSONL, metadata only, no bodies).
 - Bridge under a separate OS user (closes the same-user residual risk).
 - Hardware-bound keys option.
@@ -34,4 +34,4 @@ Acceptance for v0:
 
 ## Before the first real peer connects
 
-One security review covering: key storage, no-secrets-in-logs, edge rule verification, relay has no published ports, tool descriptions, limits, revocation drill (revoke a cert and confirm the bridge is cut off).
+Client certificates rotate weekly; a same-day revocation drill is done before the first real peer connects. One security review covering: key storage, no-secrets-in-logs, edge rule verification, relay has no published ports, tool descriptions, limits, revocation drill (revoke a cert and confirm the bridge is cut off).

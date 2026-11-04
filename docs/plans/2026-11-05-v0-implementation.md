@@ -22,6 +22,10 @@
 - Inbound content is always presented with `origin=external`, `trust=untrusted`.
 - Every test runs with `go test ./...` and needs no network, no Docker and no keychain (keychain tests are gated by `POSTERN_TEST_KEYCHAIN=1`).
 
+## Hosting decision
+
+The relay runs locally in Docker on machine A behind the tunnel (operator decision). The review asked for a Cloudflare Worker + Durable Object so the relay is always on; that is deferred. While machine A is off, messages wait in the sender's outbox and retry. The relay API is host-neutral, so a Worker can replace or front it later without bridge changes.
+
 ## Gap fixes (decided; DESIGN.md updated to match)
 
 1. **Identity binding moves into v0.** The relay maps the client certificate SHA-256 fingerprint to a peer name and rejects any `from` (post) or `to` (poll, ack) that is not that peer. In production the edge forwards the fingerprint in `X-Postern-Client-Cert-Sha256` (a transform rule that sets the header, overwriting anything the client sent); in tests and dev the relay terminates mTLS itself and computes the fingerprint.
@@ -30,7 +34,10 @@
 4. **Routing fields are authenticated.** The sealed inner message repeats `v, id, from, to, thread, ts`; `Open` rejects any mismatch with the outer envelope. `from` must be a pinned peer and `to` must be self.
 5. **Config pin.** The bridge stores the SHA-256 of its config file in the keychain and refuses to start if the file changed (relay URL, peer keys, sessions) until the human runs `postern config pin`.
 6. **Keychain items are created in-process** (Security.framework), so the item ACL trusts only the bridge binary; `security find-generic-password` from another process triggers a macOS prompt.
-7. **Residual risk, documented, not fixed in v0:** any process running as the same OS user can run the `postern` binary itself. Separate OS users for the bridge are a v1 option.
+7. **Secret scanner in v0 (review feedback).** `send` and `reply` are blocked, not redacted, when subject or body looks like a private key, token or credential assignment. Encryption does not help if a session pastes a secret into a reply, and a human approving a long reply will not read every line. The error names the rule and line only, never the match.
+8. **Codex uses `approval_policy = "untrusted"` only** (review feedback). With `on-request` the model decides when to ask, so an injection can talk it out of asking.
+9. **Taint also clears on a fresh context.** A `SessionStart` hook with `source = "clear"` drops the marker; `compact` and `resume` keep it. The human can also clear it with the `/postern-clear` command (shipped with `disable-model-invocation: true`) or the exact prompt `postern clear`.
+10. **Residual risk, documented, not fixed in v0:** any process running as the same OS user can run the `postern` binary itself. Separate OS users for the bridge are a v1 option.
 
 ## File structure
 
@@ -44,6 +51,7 @@ internal/tlsutil/tlstest/    test CA, server and client certs (Task 2)
 internal/relay/              relay server, store, long-poll, limits (Task 3)
 internal/secrets/            Store interface, macOS keychain (Task 4)
 internal/secrets/secretstest/ in-memory Store for tests (Task 4)
+internal/scan/               outgoing secret scanner (Task 4)
 internal/config/             bridge config load/validate/save/pin (Task 4)
 internal/bridge/             inbox/outbox store, relay client, poller, limits (Task 5)
 internal/mcpserver/          MCP tools, framing, descriptions (Task 6)
@@ -111,7 +119,7 @@ examples/                    session rule, Claude Code settings, Codex config
 
 ### Task 4: Secrets and config (agent)
 
-**Files:** `internal/secrets/{secrets.go,keychain_darwin.go,keychain_other.go,keychain_darwin_test.go}`, `internal/secrets/secretstest/memory.go`, `internal/config/{config.go,config_test.go}`
+**Files:** `internal/secrets/{secrets.go,keychain_darwin.go,keychain_other.go,keychain_darwin_test.go}`, `internal/secrets/secretstest/memory.go`, `internal/config/{config.go,config_test.go}`, `internal/scan/{scan.go,scan_test.go}`
 
 **Produces:**
 - `secrets.Store` interface `{ Get(name string) ([]byte, error); Set(name string, value []byte) error; Delete(name string) error }`, `secrets.ErrNotFound`, `secrets.ErrUnsupported`
@@ -121,7 +129,8 @@ examples/                    session rule, Claude Code settings, Codex config
 - `config.Config{PeerName, RelayURL, RelayCAFile, KeychainService, DataDir string; Sessions []string; Peers []PeerConfig; Limits Limits}`, `PeerConfig{Name, PublicKey, Fingerprint}`, `Limits{SessionPerHour, GlobalPerHour, ThreadMax, ThreadBurst, ThreadBurstWindowMinutes int}` (zero = default 30/60/50/10/10)
 - `config.DefaultPath() (string, error)` (`$POSTERN_CONFIG` or `os.UserConfigDir()/postern/config.json`); `Load(path) (*Config, []byte, error)`; `(*Config).Validate() error`; `Save(path string, c *Config) ([]byte, error)`; `Digest(raw []byte) string`; `Pin(st secrets.Store, raw []byte) error`; `VerifyPin(st secrets.Store, raw []byte) error` (`ErrNotPinned`, `ErrPinMismatch`); `(*Config).HasSession(string) bool`; `(*Config).DBPath() string`; `(*Config).EffectiveLimits() Limits`
 
-- [ ] Tests: validation (https only, fingerprint must match key, unique names, self not a peer, unknown JSON fields rejected); save is 0600 in a 0700 dir; pin round trip; pin mismatch after edit; keychain round trip (gated).
+- `scan.Check(subject, body string) error` returning `*scan.Finding{Rule string; Line int}` (implements `error`; message names rule and line, never the matched text). Rules: PEM/OpenSSH private keys, cloud and SaaS token prefixes (AWS access key ids, GitHub, Slack, Stripe live keys, Google API keys, generic `sk-` style API keys), JWTs, `.env`-style assignments whose key contains SECRET/TOKEN/PASSWORD/PASSWD/API_KEY/PRIVATE_KEY/ACCESS_KEY with a non-placeholder value, and long high-entropy strings next to such keywords.
+- [ ] Tests: validation (https only, fingerprint must match key, unique names, self not a peer, unknown JSON fields rejected); save is 0600 in a 0700 dir; pin round trip; pin mismatch after edit; keychain round trip (gated); scanner catches each rule (fixtures built at runtime so no real-looking secret sits in the repo), passes ordinary code, diffs and logs, and placeholders like `API_KEY=<your-key>` or `changeme`; error text never contains the secret.
 
 ### Task 5: Bridge core (agent)
 
@@ -130,12 +139,12 @@ examples/                    session rule, Claude Code settings, Codex config
 **Consumes:** `envelope`, `ulid`, `tlsutil/tlstest`.
 
 **Produces:**
-- `bridge.Options{Self string; BoxPrivate *[32]byte; Peers []Peer; RelayURL string; ClientCert tls.Certificate; RootCAs *x509.CertPool; DBPath string; Limits Limits; Logger *slog.Logger; Now func() time.Time; PollTimeout time.Duration}`, `Peer{Name string; PublicKey *[32]byte}`, `Limits{SessionPerHour, GlobalPerHour, ThreadMax, ThreadBurst int; ThreadBurstWindow time.Duration}`
+- `bridge.Options{Scanner func(subject, body string) error /* required; Open fails if nil */; Self string; BoxPrivate *[32]byte; Peers []Peer; RelayURL string; ClientCert tls.Certificate; RootCAs *x509.CertPool; DBPath string; Limits Limits; Logger *slog.Logger; Now func() time.Time; PollTimeout time.Duration}`, `Peer{Name string; PublicKey *[32]byte}`, `Limits{SessionPerHour, GlobalPerHour, ThreadMax, ThreadBurst int; ThreadBurstWindow time.Duration}`
 - `Open(Options) (*Bridge, error)`, `(*Bridge).Run(ctx) error`, `Close() error`, `Send(ctx, session string, SendRequest) (SendResult, error)`, `Reply(ctx, session, thread, body string) (SendResult, error)`, `CheckInbox(ctx, InboxQuery) ([]InboxMessage, error)`, `MarkRead(ctx, ids []string) (int, error)`, `PollOnce(ctx) (int, error)`, `FlushOutbox(ctx) (int, error)`; package func `ResetThread(ctx, dbPath, thread string) error`
 - `SendRequest{To, Subject, Body, Thread string}`, `SendResult{ID, Thread, Status string}` (`sent`|`queued`), `InboxQuery{SinceID string; Limit int; Thread string; IncludeRead bool}`, `InboxMessage{ID, Thread, FromPeer, FromSession, Subject, Body string; ReceivedAt time.Time; Read bool}`
-- Errors: `ErrInvalid`, `ErrUnknownPeer`, `ErrUnknownThread`, `ErrRateLimited`, `ErrThreadTripped`
+- Errors: `ErrInvalid`, `ErrUnknownPeer`, `ErrUnknownThread`, `ErrRateLimited`, `ErrThreadTripped`, `ErrBlocked` (wraps the scanner error)
 
-- [ ] Tests: send/poll/ack round trip through fake relay over mTLS; tampered, wrong-recipient, unknown-sender and routing-mismatch envelopes dropped and acked; dedup on redelivery; relay offline then back (queued then sent, reseal after stale window); rate limits per session and global; thread cap and burst trip, reset clears; reply picks the peer and `Re:` subject; two bridges on one DB, no duplicates; logs contain no subject/body; HTTP transport ignores proxy env vars.
+- [ ] Tests: scanner rejection blocks send and reply before anything is stored or posted; send/poll/ack round trip through fake relay over mTLS; tampered, wrong-recipient, unknown-sender and routing-mismatch envelopes dropped and acked; dedup on redelivery; relay offline then back (queued then sent, reseal after stale window); rate limits per session and global; thread cap and burst trip, reset clears; reply picks the peer and `Re:` subject; two bridges on one DB, no duplicates; logs contain no subject/body; HTTP transport ignores proxy env vars.
 
 ### Task 6: MCP server (agent)
 
@@ -155,10 +164,11 @@ examples/                    session rule, Claude Code settings, Codex config
 
 **Produces:**
 - `guard.Options{StateDir, ServerName string; Now func() time.Time}`, `DefaultStateDir() (string, error)`
-- `Run(event string, stdin io.Reader, stdout io.Writer, opts Options) int` for events `pre-tool-use`, `post-tool-use`, `user-prompt-submit`
-- `InstallClaudeCode(settingsPath, binaryPath, serverName string) error` (idempotent merge, keeps unrelated keys)
+- `Run(event string, stdin io.Reader, stdout io.Writer, opts Options) int` for events `pre-tool-use`, `post-tool-use`, `user-prompt-submit`, `session-start`
+- `InstallClaudeCode(projectDir, binaryPath, serverName string) error`: idempotent merge into `projectDir/.claude/settings.json` (keeps unrelated keys) and writes `projectDir/.claude/commands/postern-clear.md` with `disable-model-invocation: true`
+- While tainted, the `ask` reason for Postern `send`/`reply` states the body size and asks the human to read the whole body.
 
-- [ ] Tests: taint set on `check_inbox`, dropped on `"message_count":0`, kept otherwise; every other tool asks while tainted, including Postern `send`/`reply`; `postern clear` clears and blocks the prompt; ordinary prompt does not clear; bypass/unknown mode denies; malformed input asks; injection fixture yields zero unapproved calls; installer is idempotent and preserves existing settings.
+- [ ] Tests: taint set on `check_inbox`, dropped on `"message_count":0`, kept otherwise; every other tool asks while tainted, including Postern `send`/`reply`; `/postern-clear` and `postern clear` clear and block the prompt; ordinary prompt ("ok, carry on") does not clear; `SessionStart` `clear` clears, `compact`/`resume` keep; bypass/unknown mode denies; malformed input asks; injection fixture (run a command, edit a file, push code, and exfiltration: reply with `.env`, a key file, `git log -p`) yields zero unapproved calls; installer is idempotent and preserves existing settings. Codex example uses `approval_policy = "untrusted"` only.
 
 ### Task 8: CLI, end-to-end, docs (coordinator)
 
