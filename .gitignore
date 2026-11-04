@@ -1,0 +1,11 @@
+# local, private context - never commit
+CLAUDE.local.md
+*.local.md
+.env
+*.pem
+*.key
+*.p12
+config.local.*
+data/
+*.db
+*.db-*
