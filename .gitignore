@@ -9,3 +9,11 @@ config.local.*
 data/
 *.db
 *.db-*
+
+# deployment files with real values (examples are tracked)
+deploy/relay.json
+deploy/secrets/
+deploy/cloudflared/config.yml
+
+# build output
+/bin/
