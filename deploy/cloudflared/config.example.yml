@@ -1,0 +1,14 @@
+# cloudflared configuration for the Postern relay tunnel.
+# Copy to deploy/cloudflared/config.yml (gitignored) and replace the
+# placeholders. See docs/edge-setup.md.
+tunnel: <TUNNEL_UUID>
+credentials-file: /run/secrets/tunnel_credentials
+no-autoupdate: true
+
+ingress:
+  # The one public hostname. The edge enforces client certificates and
+  # sets X-Postern-Client-Cert-Sha256 before traffic reaches the tunnel.
+  - hostname: postern.example.com
+    service: http://relay:8080
+  # Anything else is refused at the tunnel.
+  - service: http_status:404

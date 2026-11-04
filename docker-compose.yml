@@ -1,0 +1,90 @@
+# Postern relay + Cloudflare Tunnel.
+#
+# The relay publishes NO ports and is attached only to an internal
+# network. The only way in is the tunnel: cloudflared dials out to the
+# edge, and the edge rejects any request without a valid, unrevoked client
+# certificate before it reaches the tunnel. The relay trusts the
+# fingerprint header the edge sets only because of this layout; never add
+# `ports:` or `expose:` here, and never attach the relay to another
+# network. cmd/postern-relay/compose_test.go enforces this.
+#
+# Real deployment files are gitignored; copy them from the examples:
+#   deploy/relay.json                    <- deploy/relay.example.json
+#   deploy/cloudflared/config.yml        <- deploy/cloudflared/config.example.yml
+#   deploy/secrets/tunnel-credentials.json  (from `cloudflared tunnel create`)
+# See docs/edge-setup.md.
+
+name: postern
+
+services:
+  relay:
+    build: .
+    image: postern-relay:local
+    restart: unless-stopped
+    read_only: true
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    user: "65532:65532"
+    command: ["-config", "/etc/postern/relay.json"]
+    volumes:
+      - type: volume
+        source: relay-data
+        target: /data
+      # Long syntax so a missing file fails `up` instead of Docker
+      # creating an empty directory in its place.
+      - type: bind
+        source: ./deploy/relay.json
+        target: /etc/postern/relay.json
+        read_only: true
+        bind:
+          create_host_path: false
+    networks:
+      - relay-internal
+    healthcheck:
+      test: ["CMD", "/usr/local/bin/postern-relay", "healthcheck"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
+
+  cloudflared:
+    image: cloudflare/cloudflared:2026.10.3@sha256:faa8e0a1475f137c910be6025f43c8e4092fdd35461b31e19fd1390657a1ff39
+    restart: unless-stopped
+    read_only: true
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    command: ["tunnel", "--no-autoupdate", "--config", "/etc/cloudflared/config.yml", "run"]
+    volumes:
+      - type: bind
+        source: ./deploy/cloudflared/config.yml
+        target: /etc/cloudflared/config.yml
+        read_only: true
+        bind:
+          create_host_path: false
+    secrets:
+      - source: tunnel_credentials
+        target: tunnel_credentials
+    networks:
+      - relay-internal
+      - egress
+    depends_on:
+      relay:
+        condition: service_healthy
+
+networks:
+  # No route out and no published ports: only relay and cloudflared.
+  relay-internal:
+    internal: true
+  # Outbound only, for cloudflared to reach the edge.
+  egress: {}
+
+volumes:
+  relay-data: {}
+
+secrets:
+  tunnel_credentials:
+    file: ./deploy/secrets/tunnel-credentials.json

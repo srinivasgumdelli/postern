@@ -1,0 +1,8 @@
+# Only what the relay image build needs reaches the build context.
+*
+!go.mod
+!go.sum
+!cmd/postern-relay/
+!internal/
+**/*_test.go
+**/testdata/

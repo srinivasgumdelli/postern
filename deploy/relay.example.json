@@ -1,0 +1,12 @@
+{
+  "listen": ":8080",
+  "db": "/data/relay.db",
+  "identity": "header",
+  "fingerprint_header": "X-Postern-Client-Cert-Sha256",
+  "peers": {
+    "peer-a": ["<PEER_A_CERT_SHA256>"],
+    "peer-b": ["<PEER_B_CERT_SHA256>"]
+  },
+  "posts_per_hour": 120,
+  "max_queued_per_peer": 1000
+}
