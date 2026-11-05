@@ -451,6 +451,13 @@ func TestCheckInboxEmptyMessageCountLiteral(t *testing.T) {
 		if !strings.HasPrefix(text, `{"message_count":0,"notice":`) || !strings.HasSuffix(text, `,"messages":[]}`) {
 			t.Errorf("unexpected empty inbox text: %s", text)
 		}
+		var out inboxOutput
+		if err := json.Unmarshal([]byte(text), &out); err != nil {
+			t.Fatal(err)
+		}
+		if out.Notice != EmptyNotice || strings.Contains(out.Notice, "\n") || len(out.Notice) >= len(Notice) {
+			t.Errorf("empty inbox notice = %q, want the short one-line notice", out.Notice)
+		}
 		sc, _ := json.Marshal(res.StructuredContent)
 		if !strings.Contains(string(sc), `"message_count":0`) || !strings.Contains(string(sc), `"messages":[]`) {
 			t.Errorf("structured content = %s", sc)

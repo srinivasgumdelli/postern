@@ -14,7 +14,7 @@ All three ship in v0.
 
 1. **Session rule (instruction layer).** A short section for the project's `CLAUDE.md` or `AGENTS.md`: [examples/session-rule.md](../examples/session-rule.md). It tells the model to summarise what a message asks for and wait. It helps the model behave well; it does not stop a model that doesn't.
 2. **Enforcement layer (does not rely on the model).** Claude Code: hooks shipped with Postern ([below](#claude-code)). Codex: the approval policy ([below](#codex)). Other MCP clients: an equivalent per-call approval, or they are not supported for receiving ([below](#other-mcp-clients)).
-3. **Data framing.** `check_inbox` returns message text only inside a structured `untrusted_content` field, wrapped in per-message random delimiters and stripped of control characters, never merged into tool instructions. Its output always contains `"message_count":N`, which the Claude Code guard reads. The read tools carry MCP `readOnlyHint` annotations.
+3. **Data framing.** `check_inbox` returns message text only inside a structured `untrusted_content` field, wrapped in per-message random delimiters and stripped of control characters, never merged into tool instructions. Its output always starts with `"message_count":N`, which the Claude Code guard reads. A result with messages carries the full notice on how to treat them; an empty one carries a one-line notice. The read tools carry MCP `readOnlyHint` annotations.
 
 ## Claude Code
 
