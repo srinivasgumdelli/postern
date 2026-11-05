@@ -79,7 +79,7 @@ func TestInstallFreshProjectMatchesExample(t *testing.T) {
 		t.Fatalf("PreToolUse handler: %v", h)
 	}
 	post := groupsFor(t, s, "PostToolUse")
-	if len(post) != 1 || post[0]["matcher"] != "mcp__postern__check_inbox" {
+	if len(post) != 1 || post[0]["matcher"] != "*" {
 		t.Fatalf("PostToolUse groups: %v", post)
 	}
 	for event, sub := range map[string]string{"PostToolUse": "post-tool-use", "UserPromptSubmit": "user-prompt-submit", "SessionStart": "session-start"} {
@@ -138,7 +138,7 @@ func TestInstallIsIdempotent(t *testing.T) {
 	// A second install must not rewrite a file it has nothing to add to.
 	path := filepath.Join(project, ".claude", "settings.json")
 	custom := []byte("{\"hooks\":{\"PreToolUse\":[{\"matcher\":\"*\",\"hooks\":[{\"type\":\"command\",\"command\":\"'/usr/local/bin/postern' hook pre-tool-use --server postern\",\"onFailure\":\"block\"}]}]," +
-		"\"PostToolUse\":[{\"matcher\":\"mcp__postern__check_inbox\",\"hooks\":[{\"type\":\"command\",\"command\":\"'/usr/local/bin/postern' hook post-tool-use --server postern\"}]}]," +
+		"\"PostToolUse\":[{\"matcher\":\"*\",\"hooks\":[{\"type\":\"command\",\"command\":\"'/usr/local/bin/postern' hook post-tool-use --server postern\"}]}]," +
 		"\"UserPromptSubmit\":[{\"hooks\":[{\"type\":\"command\",\"command\":\"'/usr/local/bin/postern' hook user-prompt-submit --server postern\"}]}]," +
 		"\"SessionStart\":[{\"hooks\":[{\"type\":\"command\",\"command\":\"'/usr/local/bin/postern' hook session-start --server postern\"}]}]}}")
 	if err := os.WriteFile(path, custom, 0o644); err != nil {
@@ -285,7 +285,7 @@ func TestInstallCustomServerName(t *testing.T) {
 		t.Fatal(err)
 	}
 	s := readSettingsFile(t, project)
-	if post := groupsFor(t, s, "PostToolUse"); post[0]["matcher"] != "mcp__review-bus__check_inbox" {
+	if post := groupsFor(t, s, "PostToolUse"); post[0]["matcher"] != "*" {
 		t.Fatalf("PostToolUse matcher = %v", post[0]["matcher"])
 	}
 	for _, event := range hookEvents {
@@ -379,6 +379,79 @@ func TestInstallAcceptsBroaderPostMatcherAndEmptyFile(t *testing.T) {
 	}
 	if n := len(groupsFor(t, readSettingsFile(t, project), "PostToolUse")); n != 1 {
 		t.Fatalf("PostToolUse groups = %d, want 1 (existing match-all entry counts)", n)
+	}
+}
+
+// Earlier installers matched PostToolUse to check_inbox only. Installing
+// again upgrades that exact entry to the match-all group, keeps the other
+// PostToolUse hooks, and ends up identical to a fresh install.
+func TestInstallUpgradesLegacyPostMatcher(t *testing.T) {
+	legacy := `{"matcher":"mcp__postern__check_inbox","hooks":[{"type":"command","command":"'/usr/local/bin/postern' hook post-tool-use --server postern"}]}`
+	other := `{"matcher":"Edit","hooks":[{"type":"command","command":"/path/to/fmt.sh"}]}`
+
+	fresh := t.TempDir()
+	if err := InstallClaudeCode(fresh, testBinary, "postern"); err != nil {
+		t.Fatal(err)
+	}
+	want, _ := os.ReadFile(filepath.Join(fresh, ".claude", "settings.json"))
+	old := strings.Replace(string(want), `"matcher": "*",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "'/usr/local/bin/postern' hook post-tool-use`, `"matcher": "mcp__postern__check_inbox",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "'/usr/local/bin/postern' hook post-tool-use`, 1)
+	if old == string(want) {
+		t.Fatal("test setup: could not build the legacy settings file")
+	}
+
+	for name, tc := range map[string]struct{ content, want string }{
+		"legacy install":   {old, string(want)},
+		"with other hooks": {`{"hooks":{"PostToolUse":[` + other + `,` + legacy + `]}}`, ""},
+	} {
+		t.Run(name, func(t *testing.T) {
+			project := t.TempDir()
+			dir := filepath.Join(project, ".claude")
+			os.MkdirAll(dir, 0o755)
+			path := filepath.Join(dir, "settings.json")
+			os.WriteFile(path, []byte(tc.content), 0o644)
+			if err := InstallClaudeCode(project, testBinary, "postern"); err != nil {
+				t.Fatal(err)
+			}
+			got, _ := os.ReadFile(path)
+			if tc.want != "" && string(got) != tc.want {
+				t.Fatalf("upgraded file differs from a fresh install:\n%s", got)
+			}
+			post := groupsFor(t, readSettingsFile(t, project), "PostToolUse")
+			var matchers []string
+			for _, g := range post {
+				m, _ := g["matcher"].(string)
+				matchers = append(matchers, m)
+			}
+			wantM := "*"
+			if name == "with other hooks" {
+				wantM = "Edit,*"
+			}
+			if strings.Join(matchers, ",") != wantM {
+				t.Fatalf("PostToolUse matchers = %v, want %s", matchers, wantM)
+			}
+		})
+	}
+
+	// A legacy-matcher entry that was edited by hand is not touched.
+	project := t.TempDir()
+	dir := filepath.Join(project, ".claude")
+	os.MkdirAll(dir, 0o755)
+	path := filepath.Join(dir, "settings.json")
+	edited := `{"hooks":{"PostToolUse":[{"matcher":"mcp__postern__check_inbox","hooks":[{"type":"command","command":"'/usr/local/bin/postern' hook post-tool-use --server postern","timeout":5}]}]}}`
+	os.WriteFile(path, []byte(edited), 0o644)
+	if err := InstallClaudeCode(project, testBinary, "postern"); err == nil {
+		t.Fatal("install accepted a hand-edited narrowed PostToolUse entry")
+	}
+	if got, _ := os.ReadFile(path); string(got) != edited {
+		t.Fatalf("settings.json was modified: %s", got)
 	}
 }
 

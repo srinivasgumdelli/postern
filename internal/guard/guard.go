@@ -5,7 +5,11 @@
 // How it works. A PreToolUse hook sets a per-session taint marker before
 // check_inbox runs, so the marker exists before untrusted text can reach the
 // model. A PostToolUse hook releases it again only if that call returned an
-// empty inbox. A session with no marker at all (for example a fork, which
+// empty inbox. The PostToolUse hook runs for every tool and also taints the
+// session when any tool's output carries Postern's untrusted framing (a
+// shell that ran the binary directly, say), and PreToolUse asks before a
+// shell command runs the binary's mcp or hook subcommand at all. A session
+// with no marker at all (for example a fork, which
 // gets a new session id and a copy of another session's history) has its
 // transcript scanned for a check_inbox call before PreToolUse decides, so
 // the guard does not depend on SessionStart having run. While the marker is
@@ -478,14 +482,21 @@ func (g *guard) postToolUse(raw []byte, readErr error) int {
 		return 2
 	}
 	if in.ToolName != g.inboxTool() {
-		if g.isForeignInboxTool(in.ToolName) {
+		// Any other tool: its output is untrusted Postern content if it is
+		// a check_inbox result from another server, or if it carries
+		// Postern's framing (for example a shell that ran the binary
+		// directly). A message_count of 0 next to the framing does not
+		// count here: only Postern's own check_inbox can release the marker.
+		if g.isForeignInboxTool(in.ToolName) || HasUntrustedFraming(in.ToolResponse) {
 			if g.taint(in.SessionID) != nil {
 				return 2
 			}
 		}
 		return 0
 	}
-	empty := inboxEmpty(in.ToolResponse)
+	// A real empty inbox carries no message framing; a result that shows
+	// any is not empty, whatever its count says.
+	empty := inboxEmpty(in.ToolResponse) && !HasUntrustedFraming(in.ToolResponse)
 	err := g.st.update(in.SessionID, func(m marker, exists bool) (marker, bool, bool) {
 		ungated := !exists || !m.gated()
 		switch {
