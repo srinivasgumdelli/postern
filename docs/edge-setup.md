@@ -150,7 +150,7 @@ Repeat for `peer-b`.
 cfapi -X DELETE "https://api.cloudflare.com/client/v4/zones/<ZONE_ID>/client_certificates/<CERT_ID>"
 ```
 
-Revocation is asynchronous: the status moves from `pending_revocation` to `revoked`. How quickly the edge enforces it: verify against current Cloudflare docs, and measure it during the revocation drill ([operations.md](operations.md)). Then remove that fingerprint from `relay.json` and restart the relay, so the relay rejects it too.
+Revocation is asynchronous: the status moves from `pending_revocation` to `revoked`. How quickly the edge enforces it: verify against current Cloudflare docs, and measure it during the revocation drill ([operations.md](operations.md)). Then remove that fingerprint from `relay.json` and restart the relay, so the relay rejects it too. If it was the peer's only fingerprint, replace it instead (step 6): the relay refuses to start with a peer that has none.
 
 List certificates (to audit, or to find a `<CERT_ID>`):
 
@@ -182,6 +182,7 @@ cfapi "https://api.cloudflare.com/client/v4/zones/<ZONE_ID>/client_certificates"
 - `edge_secret_file` is the path inside the container; leave it as is. It is required in header mode and ignored in `mtls` mode.
 - Fingerprints are 64 hex characters. Case, colons and spaces are normalized. A fingerprint may belong to only one peer.
 - During rotation a peer lists two fingerprints (old and new); remove the old one once the bridge has switched.
+- Every peer needs at least one fingerprint, and the file needs at least two peers; otherwise the relay refuses to start. To cut a peer off before its replacement certificate exists, replace its fingerprint with one that matches no certificate (`openssl rand -hex 32`) rather than leaving the list empty.
 - The relay reads the file only at start: `docker compose restart relay` after every change.
 
 Do not start the stack yet. Until the WAF rule and the transform rule (steps 7 and 8) are live, a request without a certificate, or with a client-chosen fingerprint header, would reach the relay.
