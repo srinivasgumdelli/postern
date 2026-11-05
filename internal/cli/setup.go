@@ -9,6 +9,7 @@ import (
 	"strings"
 	"time"
 
+	"postern/internal/audit"
 	"postern/internal/config"
 	"postern/internal/envelope"
 	"postern/internal/secrets"
@@ -116,6 +117,11 @@ func cmdInit(env Env, args []string) error {
 	if err := config.Pin(pinStore, path, raw); err != nil {
 		return err
 	}
+	initEvent := audit.Event{Event: audit.EventInit, Peer: cfg.PeerName}
+	if *force {
+		initEvent.Reason = "force"
+	}
+	recordTrust(env, cfg, false, initEvent)
 	csr, err := tlsutil.CreateCSR(tlsKey, cfg.PeerName)
 	if err != nil {
 		return err
@@ -199,6 +205,7 @@ func cmdPeerAdd(env Env, args []string) error {
 	if err := l.save(env, "trust peer "+*name, fmt.Sprintf("Trust peer %s with fingerprint\n  %s\nOnly approve if you compared this fingerprint with the peer out of band.", *name, want)); err != nil {
 		return err
 	}
+	recordTrust(env, l.cfg, false, audit.Event{Event: audit.EventPeerAdd, Peer: *name})
 	fmt.Fprintf(env.Stdout, "Added peer %s (%s). Config re-pinned.\n", *name, want)
 	return nil
 }
@@ -221,6 +228,7 @@ func cmdPeerRemove(env Env, args []string) error {
 	if err := l.save(env, "stop trusting peer "+*name, "Stop trusting peer "+*name+"."); err != nil {
 		return err
 	}
+	recordTrust(env, l.cfg, false, audit.Event{Event: audit.EventPeerRemove, Peer: *name})
 	fmt.Fprintf(env.Stdout, "Removed peer %s. Config re-pinned.\n", *name)
 	return nil
 }
@@ -265,12 +273,15 @@ func editSessions(env Env, cmd string, args []string, edit func(*config.Config, 
 		return err
 	}
 	reason := "allow session " + fs.Arg(0) + " to use the bridge"
+	event := audit.EventSessionAdd
 	if cmd == "session remove" {
 		reason = "remove session " + fs.Arg(0) + " from the bridge"
+		event = audit.EventSessionRemove
 	}
 	if err := l.save(env, reason, "Change which sessions may use this bridge ("+cmd+" "+fs.Arg(0)+")."); err != nil {
 		return err
 	}
+	recordTrust(env, l.cfg, false, audit.Event{Event: event, Session: fs.Arg(0)})
 	fmt.Fprintf(env.Stdout, "Sessions: %s. Config re-pinned.\n", strings.Join(l.cfg.Sessions, ", "))
 	return nil
 }
@@ -302,6 +313,13 @@ func cmdConfigPin(env Env, args []string) error {
 	if err := config.Pin(pinStore, path, raw); err != nil {
 		return err
 	}
+	// Recorded even when this config turns the audit log off, so that
+	// turning it off is the last thing the log shows.
+	pinEvent := audit.Event{Event: audit.EventConfigPin, Peer: cfg.PeerName}
+	if !cfg.AuditEnabled() {
+		pinEvent.Reason = "audit_off"
+	}
+	recordTrust(env, cfg, true, pinEvent)
 	fmt.Fprintln(env.Stdout, "Pinned.")
 	return nil
 }

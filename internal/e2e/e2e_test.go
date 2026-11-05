@@ -424,6 +424,58 @@ func TestMessageOutAndReplyBack(t *testing.T) {
 			}
 		}
 	}
+
+	// Each machine's audit log has the setup and the exchange, metadata
+	// only, and its chain verifies.
+	for _, c := range []struct {
+		n    *node
+		want []string
+	}{
+		{w.a, []string{"init", "cert_import", "peer_add", "sent", "received"}},
+		{w.b, []string{"init", "cert_import", "peer_add", "received", "sent"}},
+	} {
+		events := auditEvents(t, c.n)
+		if !containsInOrder(events, c.want) {
+			t.Fatalf("%s audit events %v, want %v in order", c.n.name, events, c.want)
+		}
+		if out := c.n.runSub(t, 0, "audit", "verify"); !strings.Contains(out, "OK: ") {
+			t.Fatalf("%s audit verify: %s", c.n.name, out)
+		}
+		raw, err := os.ReadFile(filepath.Join(filepath.Dir(c.n.cfg), "audit", "audit.jsonl"))
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, marker := range []string{subjectMarker, bodyMarker, replyMarker, "Re: ", "please review", "BEGIN"} {
+			if bytes.Contains(raw, []byte(marker)) {
+				t.Fatalf("%s audit log contains %q", c.n.name, marker)
+			}
+		}
+	}
+}
+
+// auditEvents returns the event names in n's audit log, oldest first.
+func auditEvents(t *testing.T, n *node) []string {
+	t.Helper()
+	out := n.runSub(t, 0, "audit", "tail", "-n", "1000", "--json")
+	var events []string
+	for _, line := range strings.Split(strings.TrimSpace(out), "\n") {
+		var e struct{ Event, Reason string }
+		if err := json.Unmarshal([]byte(line), &e); err != nil {
+			t.Fatalf("audit tail line %q: %v", line, err)
+		}
+		events = append(events, e.Event)
+	}
+	return events
+}
+
+func containsInOrder(have, want []string) bool {
+	i := 0
+	for _, h := range have {
+		if i < len(want) && h == want[i] {
+			i++
+		}
+	}
+	return i == len(want)
 }
 
 func TestSecretInReplyIsBlocked(t *testing.T) {
@@ -444,6 +496,14 @@ func TestSecretInReplyIsBlocked(t *testing.T) {
 	raw, _ := os.ReadFile(w.relayDB)
 	if bytes.Contains(raw, []byte("here you go")) {
 		t.Fatal("blocked message reached the relay")
+	}
+	out := w.a.runSub(t, 0, "audit", "tail", "-n", "1")
+	if !strings.Contains(out, "blocked_by_scanner") || !strings.Contains(out, "reason=rule=aws-access-key-id,line=2") {
+		t.Fatalf("audit tail after a blocked send: %s", out)
+	}
+	raw, _ = os.ReadFile(filepath.Join(filepath.Dir(w.a.cfg), "audit", "audit.jsonl"))
+	if bytes.Contains(raw, []byte(secret)) || bytes.Contains(raw, []byte("here you go")) {
+		t.Fatal("audit log holds the blocked message's content")
 	}
 }
 

@@ -72,6 +72,8 @@ Setup (run these yourself; changes ask for Touch ID or your login password):
   postern guard install-codex [--skills-dir DIR]
   postern edge-check
   postern thread reset THREAD
+  postern audit tail [-n N] [--json]
+  postern audit verify [--hash HASH]
 
 Used by agent tools:
   postern mcp --session NAME
@@ -104,6 +106,8 @@ func Run(ctx context.Context, args []string, env Env) int {
 		err = sub(env, rest, map[string]func(Env, []string) error{"install": cmdGuardInstall, "install-codex": cmdGuardInstallCodex})
 	case "thread":
 		err = sub(env, rest, map[string]func(Env, []string) error{"reset": func(e Env, a []string) error { return cmdThreadReset(ctx, e, a) }})
+	case "audit":
+		err = sub(env, rest, map[string]func(Env, []string) error{"tail": cmdAuditTail, "verify": cmdAuditVerify})
 	case "mcp":
 		err = cmdMCP(ctx, env, rest)
 	case "edge-check":
@@ -165,6 +169,24 @@ type loaded struct {
 // in the keychain. Every command except "config pin" and "init" goes
 // through here, so an edited config is never used or re-blessed silently.
 func loadPinned(env Env, flagValue string) (*loaded, error) {
+	l, err := loadPinnedConfig(env, flagValue)
+	if err != nil {
+		return nil, err
+	}
+	// Only now is anything from the file trusted, including where the
+	// bridge's own keys live.
+	store, err := env.OpenStore(l.cfg.KeychainService)
+	if err != nil {
+		return nil, fmt.Errorf("open keychain: %w", err)
+	}
+	l.store = store
+	return l, nil
+}
+
+// loadPinnedConfig is loadPinned without opening the bridge's own keys:
+// for commands (audit tail, audit verify) that only read local files.
+// The pin check still applies, so they never follow an edited data_dir.
+func loadPinnedConfig(env Env, flagValue string) (*loaded, error) {
 	path, err := configPath(flagValue)
 	if err != nil {
 		return nil, err
@@ -186,13 +208,7 @@ func loadPinned(env Env, flagValue string) (*loaded, error) {
 	case err != nil:
 		return nil, fmt.Errorf("check config pin: %w", err)
 	}
-	// Only now is anything from the file trusted, including where the
-	// bridge's own keys live.
-	store, err := env.OpenStore(cfg.KeychainService)
-	if err != nil {
-		return nil, fmt.Errorf("open keychain: %w", err)
-	}
-	return &loaded{path: path, cfg: cfg, store: store, pinStore: pinStore}, nil
+	return &loaded{path: path, cfg: cfg, pinStore: pinStore}, nil
 }
 
 // save asks the human to confirm, then writes the config and re-pins it.

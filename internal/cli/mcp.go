@@ -46,6 +46,14 @@ func cmdMCP(ctx context.Context, env Env, args []string) error {
 	if err != nil {
 		return err
 	}
+	al, err := openAudit(l.cfg)
+	if err != nil {
+		return err
+	}
+	if al != nil {
+		defer al.Close()
+		opts.Audit = al
+	}
 	b, err := bridge.Open(opts)
 	if err != nil {
 		return err

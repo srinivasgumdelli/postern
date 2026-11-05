@@ -100,7 +100,7 @@ func (h *harness) run(wantCode int, args ...string) string {
 	h.t.Helper()
 	words := 1
 	switch args[0] {
-	case "peer", "session", "cert", "config", "thread":
+	case "peer", "session", "cert", "config", "thread", "audit", "guard":
 		words = 2
 	}
 	all := append(append(append([]string{}, args[:words]...), "--config", h.cfg), args[words:]...)
