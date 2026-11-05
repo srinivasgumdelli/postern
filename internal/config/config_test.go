@@ -49,6 +49,12 @@ func TestValidateAcceptsValid(t *testing.T) {
 	if c.KeychainService != DefaultKeychainService {
 		t.Fatalf("keychain service default: %q", c.KeychainService)
 	}
+	for _, d := range []int{0, 1, MaxMessageRetentionDays} {
+		c.Limits.MessageRetentionDays = d
+		if err := c.Validate(); err != nil {
+			t.Fatalf("message_retention_days %d: %v", d, err)
+		}
+	}
 }
 
 func TestValidateRejects(t *testing.T) {
@@ -91,6 +97,8 @@ func TestValidateRejects(t *testing.T) {
 		"negative thread max":   func(c *Config) { c.Limits.ThreadMax = -1 },
 		"negative burst":        func(c *Config) { c.Limits.ThreadBurst = -1 },
 		"negative burst window": func(c *Config) { c.Limits.ThreadBurstWindowMinutes = -1 },
+		"negative retention":    func(c *Config) { c.Limits.MessageRetentionDays = -1 },
+		"retention too long":    func(c *Config) { c.Limits.MessageRetentionDays = MaxMessageRetentionDays + 1 },
 		"fingerprint of another key": func(c *Config) {
 			c.Peers[0].Fingerprint = testPeer(t, "x").Fingerprint
 		},
@@ -366,14 +374,14 @@ func TestHelpers(t *testing.T) {
 		t.Fatal("Peer unknown")
 	}
 
-	if got := c.EffectiveLimits(); got != (Limits{30, 60, 50, 10, 10}) {
+	if got := c.EffectiveLimits(); got != (Limits{30, 60, 50, 10, 10, 30}) {
 		t.Fatalf("defaults: %+v", got)
 	}
-	c.Limits = Limits{SessionPerHour: 5, ThreadBurstWindowMinutes: 3}
-	if got := c.EffectiveLimits(); got != (Limits{5, 60, 50, 10, 3}) {
+	c.Limits = Limits{SessionPerHour: 5, ThreadBurstWindowMinutes: 3, MessageRetentionDays: 7}
+	if got := c.EffectiveLimits(); got != (Limits{5, 60, 50, 10, 3, 7}) {
 		t.Fatalf("partial: %+v", got)
 	}
-	if c.Limits != (Limits{SessionPerHour: 5, ThreadBurstWindowMinutes: 3}) {
+	if c.Limits != (Limits{SessionPerHour: 5, ThreadBurstWindowMinutes: 3, MessageRetentionDays: 7}) {
 		t.Fatal("EffectiveLimits mutated the config")
 	}
 

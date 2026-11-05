@@ -34,6 +34,10 @@ const (
 	DefaultThreadMax                = 50
 	DefaultThreadBurst              = 10
 	DefaultThreadBurstWindowMinutes = 10
+	DefaultMessageRetentionDays     = 30
+
+	// MaxMessageRetentionDays bounds limits.message_retention_days.
+	MaxMessageRetentionDays = 3650
 
 	// DefaultKeychainService is used when keychain_service is empty.
 	DefaultKeychainService = "postern"
@@ -74,13 +78,19 @@ type PeerConfig struct {
 	Fingerprint string `json:"fingerprint"` // envelope.Fingerprint(PublicKey), compared out of band
 }
 
-// Limits are bridge-side send limits. Zero means the default.
+// Limits are bridge-side send limits and the local message retention.
+// Zero means the default.
+//
+// MessageRetentionDays is how long inbound and delivered outbound messages
+// stay in the local database (1 to 3650; failed ones go after 7 days,
+// pending ones are never deleted).
 type Limits struct {
 	SessionPerHour           int `json:"session_per_hour"`
 	GlobalPerHour            int `json:"global_per_hour"`
 	ThreadMax                int `json:"thread_max"`
 	ThreadBurst              int `json:"thread_burst"`
 	ThreadBurstWindowMinutes int `json:"thread_burst_window_minutes"`
+	MessageRetentionDays     int `json:"message_retention_days"`
 }
 
 var serviceRe = regexp.MustCompile(`^[a-z0-9][a-z0-9.-]{0,63}$`)
@@ -286,6 +296,10 @@ func (c *Config) Validate() error {
 	if l.SessionPerHour < 0 || l.GlobalPerHour < 0 || l.ThreadMax < 0 ||
 		l.ThreadBurst < 0 || l.ThreadBurstWindowMinutes < 0 {
 		return invalid("limits must not be negative")
+	}
+	if l.MessageRetentionDays != 0 && (l.MessageRetentionDays < 1 || l.MessageRetentionDays > MaxMessageRetentionDays) {
+		return invalid("limits.message_retention_days must be between 1 and %d (0 = %d)",
+			MaxMessageRetentionDays, DefaultMessageRetentionDays)
 	}
 	return nil
 }
@@ -508,5 +522,6 @@ func (c *Config) EffectiveLimits() Limits {
 	def(&l.ThreadMax, DefaultThreadMax)
 	def(&l.ThreadBurst, DefaultThreadBurst)
 	def(&l.ThreadBurstWindowMinutes, DefaultThreadBurstWindowMinutes)
+	def(&l.MessageRetentionDays, DefaultMessageRetentionDays)
 	return l
 }

@@ -129,7 +129,8 @@ func bridgeOptions(l *loaded, logger *slog.Logger) (bridge.Options, error) {
 			ThreadBurst:       lim.ThreadBurst,
 			ThreadBurstWindow: time.Duration(lim.ThreadBurstWindowMinutes) * time.Minute,
 		},
-		Logger: logger,
+		MessageRetention: time.Duration(lim.MessageRetentionDays) * 24 * time.Hour,
+		Logger:           logger,
 	}, nil
 }
 
