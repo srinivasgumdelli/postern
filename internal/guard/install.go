@@ -36,7 +36,9 @@ var hookEvents = []string{"PreToolUse", "PostToolUse", "UserPromptSubmit", "Sess
 // binaryPath must be the absolute path of the postern binary; serverName is
 // the MCP server name Postern is registered under in that project. Existing
 // settings keys and hooks are preserved. Running it again adds nothing.
-// Nothing is written if any check fails.
+// Running it again after the binary moved points the existing Postern hook
+// entries at the new path in place (see retargetHooks) instead of adding a
+// second set. Nothing is written if any check fails.
 func InstallClaudeCode(projectDir, binaryPath, serverName string) error {
 	if !ValidServerName(serverName) {
 		return fmt.Errorf("guard: invalid MCP server name %q (must match %s)", serverName, serverNameRe)
@@ -235,9 +237,14 @@ func mergeSettings(existing []byte, binaryPath, serverName string) ([]byte, bool
 				return nil, false, fmt.Errorf(`"hooks.%s" is not a JSON array: %w`, event, err)
 			}
 		}
-		upgraded := false
+		groups, upgraded, err := retargetHooks(event, groups, want.Hooks[0].Command, serverName)
+		if err != nil {
+			return nil, false, err
+		}
 		if event == "PostToolUse" {
-			groups, upgraded = dropLegacyPostGroup(groups, want.Hooks[0].Command, serverName)
+			var dropped bool
+			groups, dropped = dropLegacyPostGroup(groups, want.Hooks[0].Command, serverName)
+			upgraded = upgraded || dropped
 		}
 		present, err := findHook(event, groups, want)
 		if err != nil {
@@ -316,6 +323,90 @@ func matcherCovers(event string, have *string) bool {
 	default: // PreToolUse, PostToolUse and SessionStart must see every call / source
 		return all
 	}
+}
+
+// hookSubcommands maps a settings event to the hook subcommand it runs.
+var hookSubcommands = map[string]string{
+	"PreToolUse":       EventPreToolUse,
+	"PostToolUse":      EventPostToolUse,
+	"UserPromptSubmit": EventUserPromptSubmit,
+	"SessionStart":     EventSessionStart,
+}
+
+// retargetHooks points Postern hook entries that run another binary path
+// at cmd, in place, so that installing again after the binary moved does
+// not leave a second set of hooks behind (the old set would fail, and a
+// failing PreToolUse hook blocks every call). An entry is Postern's when
+// its command is one single-quoted path, as HookCommand writes it,
+// followed by exactly " hook <event> --server <serverName>" for this
+// event. Only the path changes: the group's matcher, the entry's other
+// keys and every other hook keep their values and order. findHook then
+// checks the retargeted entry like any other, so one narrowed by hand is
+// still refused.
+func retargetHooks(event string, groups []json.RawMessage, cmd, serverName string) ([]json.RawMessage, bool, error) {
+	suffix := " hook " + hookSubcommands[event] + " --server " + serverName
+	newCmd, err := marshalNoEscape(cmd)
+	if err != nil {
+		return nil, false, err
+	}
+	out := make([]json.RawMessage, len(groups))
+	changed := false
+	for i, g := range groups {
+		out[i] = g
+		group, err := parseObject(g)
+		if err != nil {
+			continue // some other shape; not ours
+		}
+		hv, ok := group.get("hooks")
+		if !ok {
+			continue
+		}
+		var handlers []json.RawMessage
+		if json.Unmarshal(hv, &handlers) != nil {
+			continue
+		}
+		touched := false
+		for j, h := range handlers {
+			handler, err := parseObject(h)
+			if err != nil {
+				continue
+			}
+			cv, ok := handler.get("command")
+			if !ok {
+				continue
+			}
+			var c string
+			if json.Unmarshal(cv, &c) != nil || c == cmd || !isPosternHookCommand(c, suffix) {
+				continue
+			}
+			handler.set("command", newCmd)
+			handlers[j] = handler.marshal()
+			touched = true
+		}
+		if !touched {
+			continue
+		}
+		arr, err := marshalNoEscape(handlers)
+		if err != nil {
+			return nil, false, err
+		}
+		group.set("hooks", arr)
+		out[i] = group.marshal()
+		changed = true
+	}
+	return out, changed, nil
+}
+
+// isPosternHookCommand reports whether c is one single-quoted path, as
+// shellQuote writes it (with any embedded quote closed, escaped and
+// reopened), followed by suffix.
+func isPosternHookCommand(c, suffix string) bool {
+	path, ok := strings.CutSuffix(c, suffix)
+	if !ok || len(path) < 3 || path[0] != '\'' || path[len(path)-1] != '\'' {
+		return false
+	}
+	inner := strings.ReplaceAll(path[1:len(path)-1], `'\''`, "")
+	return !strings.Contains(inner, "'") && !strings.ContainsFunc(inner, unicode.IsControl)
 }
 
 // dropLegacyPostGroup removes the PostToolUse group that earlier versions of

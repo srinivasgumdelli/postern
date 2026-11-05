@@ -455,6 +455,173 @@ func TestInstallUpgradesLegacyPostMatcher(t *testing.T) {
 	}
 }
 
+const movedBinary = "/opt/new place/postern"
+
+// writeSettings writes content as the project's settings.json and returns
+// its path.
+func writeSettings(t *testing.T, project, content string) string {
+	t.Helper()
+	dir := filepath.Join(project, ".claude")
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(dir, "settings.json")
+	if err := os.WriteFile(path, []byte(content), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	return path
+}
+
+// Installing again after the binary moved points every Postern entry at
+// the new path in place, rather than adding a second set next to entries
+// that now fail.
+func TestInstallAfterBinaryMovedReplacesInPlace(t *testing.T) {
+	fresh := t.TempDir()
+	if err := InstallClaudeCode(fresh, movedBinary, "postern"); err != nil {
+		t.Fatal(err)
+	}
+	want, _ := os.ReadFile(filepath.Join(fresh, ".claude", "settings.json"))
+
+	project := t.TempDir()
+	if err := InstallClaudeCode(project, testBinary, "postern"); err != nil {
+		t.Fatal(err)
+	}
+	if err := InstallClaudeCode(project, movedBinary, "postern"); err != nil {
+		t.Fatalf("install after the binary moved: %v", err)
+	}
+	got, _ := os.ReadFile(filepath.Join(project, ".claude", "settings.json"))
+	if string(got) != string(want) {
+		t.Fatalf("moved install differs from a fresh install at the new path:\n%s", got)
+	}
+	s := readSettingsFile(t, project)
+	for _, event := range hookEvents {
+		cmds := commandsFor(t, s, event)
+		if len(cmds) != 1 || !strings.HasPrefix(cmds[0], shellQuote(movedBinary)+" hook ") {
+			t.Errorf("%s commands = %q, want one entry at the new path", event, cmds)
+		}
+	}
+	// And once more changes nothing.
+	if err := InstallClaudeCode(project, movedBinary, "postern"); err != nil {
+		t.Fatal(err)
+	}
+	if again, _ := os.ReadFile(filepath.Join(project, ".claude", "settings.json")); string(again) != string(want) {
+		t.Fatalf("third install changed the file:\n%s", again)
+	}
+}
+
+// The replacement changes only the path: matchers, other keys on the
+// group and the entry, other hooks in the same group, other events' hooks
+// and Postern entries for another server name stay as they were.
+func TestInstallAfterBinaryMovedKeepsOtherKeys(t *testing.T) {
+	old := shellQuote("/usr/local/old'dir/postern")
+	content := `{"model":"x","hooks":{` +
+		`"PreToolUse":[{"matcher":"*","description":"guard","hooks":[` +
+		`{"type":"command","command":"/path/to/lint.sh"},` +
+		`{"type":"command","command":"` + jsonEscape(old) + ` hook pre-tool-use --server postern","onFailure":"block","timeout":30}]},` +
+		`{"matcher":"*","hooks":[{"type":"command","command":"` + jsonEscape(old) + ` hook pre-tool-use --server other"}]}],` +
+		`"PostToolUse":[{"matcher":"*","hooks":[{"type":"command","command":"` + jsonEscape(old) + ` hook post-tool-use --server postern"}]}],` +
+		`"UserPromptSubmit":[{"hooks":[{"type":"command","command":"` + jsonEscape(old) + ` hook user-prompt-submit --server postern"}]}],` +
+		`"SessionStart":[{"hooks":[{"type":"command","command":"` + jsonEscape(old) + ` hook session-start --server postern"}]}],` +
+		`"Stop":[{"hooks":[{"type":"command","command":"` + jsonEscape(old) + ` hook pre-tool-use --server postern"}]}]}}`
+	project := t.TempDir()
+	writeSettings(t, project, content)
+	if err := InstallClaudeCode(project, movedBinary, "postern"); err != nil {
+		t.Fatal(err)
+	}
+	s := readSettingsFile(t, project)
+	if s["model"] != "x" {
+		t.Errorf("top-level key lost: %v", s["model"])
+	}
+	pre := groupsFor(t, s, "PreToolUse")
+	if len(pre) != 2 {
+		t.Fatalf("PreToolUse groups = %d, want 2 (no new group added)", len(pre))
+	}
+	if pre[0]["description"] != "guard" || pre[0]["matcher"] != "*" {
+		t.Errorf("group keys changed: %v", pre[0])
+	}
+	hs := pre[0]["hooks"].([]any)
+	if len(hs) != 2 || hs[0].(map[string]any)["command"] != "/path/to/lint.sh" {
+		t.Fatalf("other hook in the group changed: %v", hs)
+	}
+	h := hs[1].(map[string]any)
+	if h["command"] != HookCommand(movedBinary, EventPreToolUse, "postern") || h["onFailure"] != "block" || h["timeout"] != float64(30) {
+		t.Errorf("Postern entry = %v, want the new path with its other keys kept", h)
+	}
+	if c := pre[1]["hooks"].([]any)[0].(map[string]any)["command"]; c != old+" hook pre-tool-use --server other" {
+		t.Errorf("entry for another server name changed: %v", c)
+	}
+	// A pre-tool-use command filed under another event is not the guard's
+	// entry for that event; it is left alone.
+	if c := commandsFor(t, s, "Stop"); len(c) != 1 || c[0] != old+" hook pre-tool-use --server postern" {
+		t.Errorf("Stop hook changed: %v", c)
+	}
+	for _, event := range []string{"PostToolUse", "UserPromptSubmit", "SessionStart"} {
+		if c := commandsFor(t, s, event); len(c) != 1 || c[0] != HookCommand(movedBinary, hookSubcommands[event], "postern") {
+			t.Errorf("%s commands = %q", event, c)
+		}
+	}
+}
+
+// A stale entry that was narrowed by hand is refused, as for the current
+// path, and the file is left as it was. So is the legacy check_inbox-only
+// PostToolUse group once it carries an edit; untouched, it upgrades.
+func TestInstallAfterBinaryMovedRefusesNarrowed(t *testing.T) {
+	old := shellQuote(testBinary)
+	for name, content := range map[string]string{
+		"matcher":   `{"hooks":{"PreToolUse":[{"matcher":"Bash","hooks":[{"type":"command","command":"` + old + ` hook pre-tool-use --server postern"}]}]}}`,
+		"if filter": `{"hooks":{"PreToolUse":[{"matcher":"*","hooks":[{"type":"command","if":"Bash(git *)","command":"` + old + ` hook pre-tool-use --server postern"}]}]}}`,
+		"async":     `{"hooks":{"SessionStart":[{"hooks":[{"type":"command","async":true,"command":"` + old + ` hook session-start --server postern"}]}]}}`,
+		"legacy edited": `{"hooks":{"PostToolUse":[{"matcher":"mcp__postern__check_inbox","hooks":[{"type":"command","command":"` +
+			old + ` hook post-tool-use --server postern","timeout":5}]}]}}`,
+	} {
+		t.Run(name, func(t *testing.T) {
+			project := t.TempDir()
+			path := writeSettings(t, project, content)
+			err := InstallClaudeCode(project, movedBinary, "postern")
+			if err == nil || !strings.Contains(err.Error(), "narrowed") {
+				t.Fatalf("install accepted a narrowed stale entry: %v", err)
+			}
+			if got, _ := os.ReadFile(path); string(got) != content {
+				t.Fatalf("settings.json was modified: %s", got)
+			}
+		})
+	}
+
+	project := t.TempDir()
+	writeSettings(t, project, `{"hooks":{"PostToolUse":[{"matcher":"mcp__postern__check_inbox","hooks":[{"type":"command","command":"`+old+` hook post-tool-use --server postern"}]}]}}`)
+	if err := InstallClaudeCode(project, movedBinary, "postern"); err != nil {
+		t.Fatalf("legacy group at the old path: %v", err)
+	}
+	post := groupsFor(t, readSettingsFile(t, project), "PostToolUse")
+	if len(post) != 1 || post[0]["matcher"] != "*" || commandsFor(t, readSettingsFile(t, project), "PostToolUse")[0] != HookCommand(movedBinary, EventPostToolUse, "postern") {
+		t.Fatalf("legacy group not upgraded to the new path: %v", post)
+	}
+}
+
+func TestIsPosternHookCommand(t *testing.T) {
+	const suffix = " hook pre-tool-use --server postern"
+	for c, want := range map[string]bool{
+		"'/usr/local/bin/postern'" + suffix:         true,
+		shellQuote("/a b/it's/postern") + suffix:    true,
+		"/usr/local/bin/postern" + suffix:           false, // never written unquoted
+		"'/x' && '/y'" + suffix:                     false,
+		"''" + suffix:                               false,
+		"'/x'" + suffix + " --extra":                false,
+		"'/x' hook pre-tool-use --server postern-2": false,
+		"'/x\n'" + suffix:                           false,
+	} {
+		if got := isPosternHookCommand(c, suffix); got != want {
+			t.Errorf("isPosternHookCommand(%q) = %v, want %v", c, got, want)
+		}
+	}
+}
+
+// jsonEscape escapes s for use inside a JSON string literal.
+func jsonEscape(s string) string {
+	b, _ := json.Marshal(s)
+	return string(b[1 : len(b)-1])
+}
+
 func TestInstallRefusesLocalDisableAllHooks(t *testing.T) {
 	project := t.TempDir()
 	dir := filepath.Join(project, ".claude")

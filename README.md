@@ -122,6 +122,7 @@ Detailed references: [docs/relay-modes.md](docs/relay-modes.md), [docs/edge-setu
 | `postern guard install`, `postern guard install-codex` | Install the session guard and skill |
 | `postern mcp --session NAME` | MCP server for one agent session (started by the agent tool) |
 | `postern hook EVENT` | Claude Code hook entry point (run by Claude Code) |
+| `postern wait --session NAME [--timeout DUR]` | Block until a new message arrives and print only its count and peer (exit 0; 3 on timeout), for a background watcher |
 | `postern-relay -config FILE` | The relay (runs in Docker) |
 
 ## Layout

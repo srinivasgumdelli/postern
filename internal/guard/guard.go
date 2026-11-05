@@ -681,11 +681,15 @@ type contextFields struct {
 	AdditionalContext string `json:"additionalContext"`
 }
 
-// reasonCleared is shown to the human (the prompt is swallowed, so it never
-// reaches the model). A message can ask the human to type "postern clear",
-// so it says plainly what clearing gives up and who should not be trusted.
-const reasonCleared = "Postern guard cleared for this session. " +
-	"Untrusted Postern content is still in the conversation, and tool calls will now run without per-call approval. " +
+// reasonCleared is shown to the human. The hook answers decision "block"
+// so that the prompt never reaches the model; Claude Code shows the reason
+// to the user (not to the model) as the block message, so it opens by
+// saying the clear worked. A message can ask the human to type "postern
+// clear", so it also says plainly what clearing gives up and who should
+// not be trusted.
+const reasonCleared = "Postern guard cleared. " +
+	"This prompt was not sent to the model. " +
+	"Tool calls in this session now run without per-call approval, and the untrusted Postern content is still in the conversation. " +
 	"If a message asked you to type this, do not trust that message. " +
 	"Use /clear for a fresh context instead."
 

@@ -451,6 +451,13 @@ func TestCheckInboxEmptyMessageCountLiteral(t *testing.T) {
 		if !strings.HasPrefix(text, `{"message_count":0,"notice":`) || !strings.HasSuffix(text, `,"messages":[]}`) {
 			t.Errorf("unexpected empty inbox text: %s", text)
 		}
+		var out inboxOutput
+		if err := json.Unmarshal([]byte(text), &out); err != nil {
+			t.Fatal(err)
+		}
+		if out.Notice != EmptyNotice || strings.Contains(out.Notice, "\n") || len(out.Notice) >= len(Notice) {
+			t.Errorf("empty inbox notice = %q, want the short one-line notice", out.Notice)
+		}
 		sc, _ := json.Marshal(res.StructuredContent)
 		if !strings.Contains(string(sc), `"message_count":0`) || !strings.Contains(string(sc), `"messages":[]`) {
 			t.Errorf("structured content = %s", sc)
@@ -907,8 +914,14 @@ func TestRelayStatusInCheckInbox(t *testing.T) {
 }
 
 func TestRelayStatusInSendAndReply(t *testing.T) {
-	for _, code := range []string{RelayAuthFailed, RelayUnreachable} {
-		svc := &statusService{fakeService: fakeService{sendOut: SendOutput{ID: "01JC9Z00000000000000000009", Thread: testThread, Status: "queued"}}, status: code}
+	cases := []struct{ status, code, detail string }{
+		{RelayAuthFailed, RelayAuthFailed, relayStatusDetail[RelayAuthFailed]},
+		{RelayUnreachable, RelayUnreachable, relayStatusDetail[RelayUnreachable]},
+		{"relay_slow", "relay_slow", relayStatusGeneric},
+		{"Bad\x1b[2J code", "unknown", relayStatusGeneric},
+	}
+	for _, c := range cases {
+		svc := &statusService{fakeService: fakeService{sendOut: SendOutput{ID: "01JC9Z00000000000000000009", Thread: testThread, Status: "queued"}}, status: c.status}
 		cs := connect(t, svc, nil)
 		for name, args := range map[string]map[string]any{
 			"send":  {"to": "peer-b", "subject": "s", "body": "b"},
@@ -918,9 +931,21 @@ func TestRelayStatusInSendAndReply(t *testing.T) {
 			if res.IsError {
 				t.Fatalf("%s failed: %s", name, resultText(t, res))
 			}
-			want := `{"id":"01JC9Z00000000000000000009","relay_status":"` + code + `","status":"queued","thread":"` + testThread + `"}`
+			detail, err := json.Marshal(c.detail)
+			if err != nil {
+				t.Fatal(err)
+			}
+			want := `{"id":"01JC9Z00000000000000000009","relay_status":"` + c.code + `","relay_status_detail":` + string(detail) + `,"status":"queued","thread":"` + testThread + `"}`
 			if got := resultText(t, res); got != want {
 				t.Errorf("%s output = %s, want %s", name, got, want)
+			}
+			// The sentence is the one check_inbox gives for the same code.
+			var out SendOutput
+			if err := json.Unmarshal([]byte(resultText(t, res)), &out); err != nil {
+				t.Fatal(err)
+			}
+			if out.RelayStatusDetail != c.detail || out.RelayStatusDetail == "" {
+				t.Errorf("%s relay_status_detail = %q, want %q", name, out.RelayStatusDetail, c.detail)
 			}
 		}
 	}

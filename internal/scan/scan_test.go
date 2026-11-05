@@ -193,11 +193,11 @@ func positives(t *testing.T) []positive {
 }
 
 func wantText(rule string, line int) string {
-	where := fmt.Sprintf("on line %d", line)
+	where := fmt.Sprintf("on line %d of the body", line)
 	if line == 0 {
 		where = "in the subject"
 	}
-	return "possible " + rule + " " + where + "; remove it before sending (Postern blocks messages that look like secrets)"
+	return "possible " + rule + " " + where + "; remove it before sending"
 }
 
 func TestPositives(t *testing.T) {

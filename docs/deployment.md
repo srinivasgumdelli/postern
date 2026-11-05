@@ -411,6 +411,26 @@ A smoke test. Each human approves every prompt only after reading it.
 
 For a full walkthrough with real handoffs, see [example.md](example.md).
 
+### Getting told when a message arrives
+
+Postern does not push messages into a session. `postern wait --session NAME` blocks until a new unread message for that session is in the inbox, prints only a count and the peer name (`1 new Postern message from peer-a. Read it with check_inbox.`) and exits 0. With `--timeout 30m` it exits 3 when nothing arrived in time; on errors it exits 1. It never prints subjects, bodies or the sender's session name, runs its own poller (no MCP server needed) and reports each message once per session. Details: [session-guard.md](session-guard.md#watching-for-new-messages).
+
+- **Claude Code:** ask the session to run `postern wait --session review` as a background task and check Postern when it finishes. Start a new watcher after each notification; once the session is tainted, that `Bash` call asks you first.
+- **Codex and other clients:** run it in a separate terminal in a loop that notifies you, and ask the session to check Postern when it fires:
+
+  ```sh
+  while :; do
+    postern wait --session review --timeout 1h
+    case $? in
+      0) osascript -e 'display notification "New Postern message" with title "Postern"' ;;
+      3) ;;
+      *) sleep 60 ;;
+    esac
+  done
+  ```
+
+- **Smoke test:** on machine B run `postern wait --session review --timeout 5m` in a terminal, send from machine A, and check that it prints one line naming `peer-a` and exits 0.
+
 ## 11. Before the first real peer
 
 Do these the same day, with both humans and the operator present.
@@ -438,7 +458,7 @@ Do these the same day, with both humans and the operator present.
 
 - **Keychain prompts after a rebuild.** A new binary is a new application to the keychain, so macOS asks once per Postern keychain item whether it may use it. Run `postern edge-check` in a terminal first, so the prompts appear there instead of in the middle of an agent session. Choose **Always Allow** only for the `postern` binary you just installed. Deny a Postern keychain prompt from any other program and investigate.
 - **Re-pin after config changes.** Upgrading does not change the config, but any edit you make to it (for example `limits.message_retention_days`, or `relay_url` when [switching relay modes](relay-modes.md#switching-modes)) makes the bridge refuse to start until you review it and run `postern config pin` (Touch ID or password).
-- **Reinstall the skill and hooks.** Run `postern guard install --project /path/to/project` for each Claude Code project and `postern guard install-codex` for Codex. Neither overwrites a file with different content: if the skill or `/postern-clear` command changed in the new version, the installer stops with "exists with different content; not overwriting it". Check that you did not edit that file on purpose, delete it, and run the installer again. If the binary path changed, remove the old Postern hook entries from `.claude/settings.json` first, because the installer adds hooks for the new path rather than replacing the old ones. Check `/hooks` afterwards.
+- **Reinstall the skill and hooks.** Run `postern guard install --project /path/to/project` for each Claude Code project and `postern guard install-codex` for Codex. Neither overwrites a file with different content: if the skill or `/postern-clear` command changed in the new version, the installer stops with "exists with different content; not overwriting it". Check that you did not edit that file on purpose, delete it, and run the installer again. If the binary path changed, the installer points the existing Postern hook entries at the new path in place, keeping their matchers and other keys; it refuses, and changes nothing, if one of them was narrowed by hand (a matcher, `if` or async). Check `/hooks` afterwards.
 - **Relay.** Docker mode: `git pull`, then `docker compose up -d --build`. Worker mode: `npm ci && npm test`, then `npx wrangler deploy`. Run `postern edge-check` on both machines afterwards.
 
 ## 13. Troubleshooting

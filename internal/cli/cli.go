@@ -77,7 +77,12 @@ Used by agent tools:
   postern mcp --session NAME
   postern hook pre-tool-use|post-tool-use|user-prompt-submit|session-start [--server postern]
 
-Every command accepts --config PATH (default $POSTERN_CONFIG or the user config dir).
+Watching for messages (prints a count and peer names only, never content):
+  postern wait --session NAME [--timeout DURATION]
+      exits 0 when new messages arrive, 3 on timeout, 1 on error
+
+Commands that use the bridge config accept --config PATH (default
+$POSTERN_CONFIG or the user config dir). guard and hook do not read it.
 `
 
 // Run executes one postern command and returns the exit code.
@@ -106,6 +111,10 @@ func Run(ctx context.Context, args []string, env Env) int {
 		err = sub(env, rest, map[string]func(Env, []string) error{"reset": func(e Env, a []string) error { return cmdThreadReset(ctx, e, a) }})
 	case "mcp":
 		err = cmdMCP(ctx, env, rest)
+	case "wait":
+		if err = cmdWait(ctx, env, rest); errors.Is(err, errWaitTimeout) {
+			return exitWaitTimeout
+		}
 	case "edge-check":
 		err = cmdEdgeCheck(ctx, env, rest)
 	case "hook":

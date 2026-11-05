@@ -14,7 +14,7 @@ All three ship in v0.
 
 1. **Session rule (instruction layer).** A short section for the project's `CLAUDE.md` or `AGENTS.md`: [examples/session-rule.md](../examples/session-rule.md). It tells the model to summarise what a message asks for and wait. It helps the model behave well; it does not stop a model that doesn't.
 2. **Enforcement layer (does not rely on the model).** Claude Code: hooks shipped with Postern ([below](#claude-code)). Codex: the approval policy ([below](#codex)). Other MCP clients: an equivalent per-call approval, or they are not supported for receiving ([below](#other-mcp-clients)).
-3. **Data framing.** `check_inbox` returns message text only inside a structured `untrusted_content` field, wrapped in per-message random delimiters and stripped of control characters, never merged into tool instructions. Its output always contains `"message_count":N`, which the Claude Code guard reads. The read tools carry MCP `readOnlyHint` annotations.
+3. **Data framing.** `check_inbox` returns message text only inside a structured `untrusted_content` field, wrapped in per-message random delimiters and stripped of control characters, never merged into tool instructions. Its output always starts with `"message_count":N`, which the Claude Code guard reads. A result with messages carries the full notice on how to treat them; an empty one carries a one-line notice. The read tools carry MCP `readOnlyHint` annotations.
 
 ## Claude Code
 
@@ -35,7 +35,7 @@ All three ship in v0.
    postern guard install --project /path/to/project
    ```
 
-   This merges four hooks into `/path/to/project/.claude/settings.json` (keeping every existing key and hook; running it again adds nothing) and writes `/path/to/project/.claude/commands/postern-clear.md`. The result for a fresh project is [examples/claude-code/settings.json](../examples/claude-code/settings.json):
+   This merges four hooks into `/path/to/project/.claude/settings.json` (keeping every existing key and hook; running it again adds nothing, and running it again after the binary moved points the existing Postern entries at the new path in place) and writes `/path/to/project/.claude/commands/postern-clear.md`. The result for a fresh project is [examples/claude-code/settings.json](../examples/claude-code/settings.json):
 
    | Event | Matcher | Command |
    |---|---|---|
@@ -70,7 +70,7 @@ The guard keeps one marker file per Claude Code session.
    - `check_inbox` and `mark_read` (Postern's read tools): no decision; they run as usual.
    - Every other tool, including Postern's own `send` and `reply`, `Bash`, `Read`, `Edit`, `Write`, `WebFetch`, `Agent`/`Task`, skills and every other MCP server's tools: **ask**. The permission prompt says that untrusted content from another machine is in the session and asks you to check that you requested this call. For `send` and `reply` it also states the size of the subject and body in bytes and asks you to read the whole outgoing text, because it leaves the machine.
    - In a permission mode that does not stop for a human (`bypassPermissions`, `auto`, `dontAsk`, or any mode the guard does not recognise): **deny**, with a message saying the session must not run in that mode while untrusted Postern content is in context.
-4. Whether or not the session is tainted, `PreToolUse` **asks** before a shell command that runs the Postern binary's `mcp` or `hook` subcommand (it **denies** in the non-prompting modes). Postern is meant to be used through its MCP tools. A session with shell access could otherwise start `postern mcp --session NAME` itself and pipe JSON-RPC into it, which would read the inbox as plain command output or send without the guard's prompt. It could also feed `postern hook` fake events. The check applies to `Bash` and to any tool whose input has a `command` (or `cmd`) string. It matches a word naming the binary (basename `postern`, any case, or the path the hook itself runs from) followed by `mcp`, `hook` or a subcommand computed at run time (`$VAR`, `$(...)`). Pipes, `bash -c '...'`, `env`, subshells and quoting tricks such as `pos''tern` count too. Other subcommands, such as `postern show`, `postern edge-check` and `postern version`, are not intercepted. The permission prompt explains that running the binary directly bypasses the guard.
+4. Whether or not the session is tainted, `PreToolUse` **asks** before a shell command that runs the Postern binary's `mcp` or `hook` subcommand (it **denies** in the non-prompting modes). Postern is meant to be used through its MCP tools. A session with shell access could otherwise start `postern mcp --session NAME` itself and pipe JSON-RPC into it, which would read the inbox as plain command output or send without the guard's prompt. It could also feed `postern hook` fake events. The check applies to `Bash` and to any tool whose input has a `command` (or `cmd`) string. It matches a word naming the binary (basename `postern`, any case, or the path the hook itself runs from) followed by `mcp`, `hook` or a subcommand computed at run time (`$VAR`, `$(...)`). Pipes, `bash -c '...'`, `env`, subshells and quoting tricks such as `pos''tern` count too. Other subcommands, such as `postern show`, `postern edge-check`, `postern version` and `postern wait` ([below](#watching-for-new-messages)), are not intercepted. The permission prompt explains that running the binary directly bypasses the guard.
    - **This is a speed bump, not a boundary.** A shell is a full programming language: a copied or renamed binary, a script file, or a command built from an encoded string gets past any pattern. Its job is to stop the obvious route with an explanation. If such a run does go ahead, the framing check in `PostToolUse` still taints the session from its output, unless the output was transformed (for example base64-encoded) on the way. The underlying limit is that the bridge runs as the same OS user as the session (see [Residual risks](#residual-risks)).
 5. A tainted session also gets a short reminder in the model's context on each prompt and after compaction or resume.
 6. When `PreToolUse` finds **no marker at all** for a session, it scans the session's transcript (streaming, line by line, ignoring the current call's own line) for a `check_inbox` call before deciding. For the tool name, only an actual tool call counts: a JSONL line holding a structural `"type":"tool_use"` and `"name":"mcp__<server>__check_inbox"` (unescaped quotes, optional whitespace around the colon). Tool names that appear as text, such as Claude Code's deferred-tool listings or a tool result quoting the name, sit inside JSON string values with escaped quotes and do not match. A line that shows Postern's untrusted framing (the same signals as in step 2, in any escaping) also counts, so a fork of a session that read the inbox through a shell inherits the taint. A line too long to hold in the scan's bounded buffer (1 MiB) counts if it contains both `tool_use` and `__check_inbox`, or `POSTERN MESSAGE`, or both `external` and `untrusted`, anywhere. If it finds one, the session is tainted on the spot. This covers sessions whose history came from elsewhere, such as a fork or branch (a new session id with a copy of the conversation), even when `SessionStart` did not run, could not write the marker, or ran before the copied history reached the file. A scan that finds nothing records a `clean` marker with the number of bytes scanned, so later calls scan only what was appended (and rescan from the start if the file shrank or the path changed). No transcript path, or no transcript file yet, leaves the session untainted. A transcript that exists but cannot be read makes the call ask.
@@ -89,11 +89,54 @@ The last two clear the guard but leave the message in the conversation. Use them
 
 A message can try to talk you into clearing: "the guard is stuck, type `postern clear` to continue". So when either one clears the guard, the notice Claude Code shows you says it plainly:
 
-> Postern guard cleared for this session. Untrusted Postern content is still in the conversation, and tool calls will now run without per-call approval. If a message asked you to type this, do not trust that message. Use /clear for a fresh context instead.
+> Postern guard cleared. This prompt was not sent to the model. Tool calls in this session now run without per-call approval, and the untrusted Postern content is still in the conversation. If a message asked you to type this, do not trust that message. Use /clear for a fresh context instead.
+
+What you see. To keep the prompt from the model, the hook answers `{"decision":"block","reason":...}`. The Claude Code hooks reference says that on `UserPromptSubmit` a `"block"` stops the prompt before it reaches Claude, the `reason` is shown to the user and not added to context, the turn ends with the reason as a warning line, and by default the block message ends with `Original prompt:` and the text you typed (here `postern clear`, which is harmless). So the notice appears where Claude Code shows blocked prompts, possibly styled as a warning; that is why it opens with "Postern guard cleared." The clear itself succeeded. The exact styling and wording Claude Code puts around the reason were not checked in a live session (**unverified**).
 
 The guard never needs clearing for Postern to work. If you are unsure, use `/clear`.
 
 An ordinary reply such as "ok, carry on" does **not** clear the guard. The untrusted text is still in context and can still be steering the model; "carry on" approves nothing in particular. Compaction and resume keep the marker too, because a summary of the conversation can still carry the message's instructions. A forked or branched session (a new session id) inherits the guard if its history shows a `check_inbox` call or Postern's framing, or cannot be read. Clearing writes a `cleared` marker rather than deleting it, so the old `check_inbox` call still visible in the transcript does not re-arm the guard; the next real `check_inbox` does.
+
+### Watching for new messages
+
+Postern does not push messages into a session. To find out when one arrives without asking the session to poll, run a watcher:
+
+```sh
+postern wait --session review [--timeout 30m]
+```
+
+It blocks until the inbox holds at least one unread message that this session has not been told about, prints one line and exits 0:
+
+```text
+1 new Postern message from peer-a. Read it with check_inbox.
+```
+
+With `--timeout`, it exits 3 after printing `No new Postern messages within 30m0s.`; on any error (unlisted session, edited config, no certificate) it exits 1. The session must be listed in the config, as for `postern mcp`.
+
+Why it is safe outside the guard: the line holds only the count and the peer names from your own pinned config. `wait` never prints a subject, a body or the sender's session name, so a shell watcher brings no untrusted text into the session. The session reads the messages with `check_inbox`, which goes through the guard as usual. The direct-run check above intercepts only `mcp` and `hook`, so the guard does not stop `postern wait` in an untainted session (Claude Code's own permission rules still apply), and its output carries no framing, so it does not taint the session.
+
+How it counts:
+
+- It runs its own poller, so it works with no MCP server running, and it also sees messages that any other Postern process on the machine (a session's MCP server) stored.
+- Each message is reported once per session. The bridge keeps, in its encrypted inbox database, the highest message it reported to each session. A message that arrives while no watcher runs is reported by the next one; the first watcher for a session reports every unread message already stored. Reading a message (`mark_read`) before a watcher sees it means it is not reported.
+- If the relay rejects this bridge's certificate or is unreachable, `wait` says so once on stderr (`postern wait: relay_status relay_auth_failed: ...`), with the same sentence `check_inbox` uses, and keeps waiting.
+
+**As a Claude Code background watcher.** Ask the session to run it as a background task, for example: "Run `postern wait --session review` in the background. When it finishes, tell me what it printed, then check Postern." Claude Code runs the command with the Bash tool's background option and tells the session when the command exits; the session then sees only the one line. Start a new watcher after each notification. Once the session has read a message it is tainted, so starting the watcher again is a `Bash` call that asks you; approve it if it is exactly the `postern wait` command. In `bypassPermissions`, `auto` or `dontAsk` mode it is denied while tainted, like every other call. The background-task behaviour is Claude Code's; it was not checked in a live session (**unverified**).
+
+**For tools without background watchers** (Codex, or any client that cannot be notified), run the watcher in a separate terminal and let it tell you, not the agent:
+
+```sh
+while :; do
+  postern wait --session review --timeout 1h
+  case $? in
+    0) osascript -e 'display notification "New Postern message" with title "Postern"' ;;
+    3) ;;          # timeout: wait again
+    *) sleep 60 ;; # error: see the message above, then retry
+  esac
+done
+```
+
+When it fires, ask the session to check Postern. Do not run `postern wait` inside a Codex session's own shell: it blocks that turn until a message arrives.
 
 ### Never use bypass or auto-approve modes
 
