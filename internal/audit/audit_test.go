@@ -570,6 +570,33 @@ func TestTornLastLine(t *testing.T) {
 	}
 }
 
+// TestVerifyHashCatchesACutEnd: cutting lines off the end leaves a valid
+// chain; a last hash noted earlier is what shows it.
+func TestVerifyHashCatchesACutEnd(t *testing.T) {
+	path := logPath(t)
+	l := mustOpen(t, path, Options{})
+	for i := range 5 {
+		mustRecord(t, l, sent(i))
+	}
+	noted := mustVerify(t, path).LastHash
+	mustRecord(t, l, sent(5))
+	s, err := VerifyHash(path, noted)
+	if err != nil || s.HashSeq != 5 || s.LastSeq != 6 {
+		t.Fatalf("VerifyHash = %+v, %v", s, err)
+	}
+	lines := readLines(t, path)
+	writeLines(t, path, lines[:3])
+	if _, err := Verify(path); err != nil {
+		t.Fatalf("a cut end should still chain: %v", err)
+	}
+	if _, err := VerifyHash(path, noted); !errors.Is(err, ErrHashNotFound) {
+		t.Fatalf("VerifyHash after cut = %v, want ErrHashNotFound", err)
+	}
+	if _, err := VerifyHash(path, "nope"); err == nil {
+		t.Fatal("malformed hash accepted")
+	}
+}
+
 func TestVerifyEmpty(t *testing.T) {
 	path := logPath(t)
 	if s := mustVerify(t, path); s.Events != 0 {

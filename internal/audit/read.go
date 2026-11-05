@@ -164,6 +164,8 @@ type Summary struct {
 	// prev. It is false once the oldest rotated files have been removed:
 	// the first kept line is then trusted as the start.
 	Anchored bool
+	// HashSeq is the seq of the entry whose hash VerifyHash was given.
+	HashSeq uint64
 }
 
 // Verify checks the chain across the rotated files and the active file
@@ -171,7 +173,29 @@ type Summary struct {
 // does not parse, does not carry the next seq, or whose prev is not the
 // hash of the line before it (including across a rotation). An empty or
 // missing log verifies with zero events.
-func Verify(path string) (Summary, error) {
+func Verify(path string) (Summary, error) { return verify(path, "") }
+
+// ErrHashNotFound means VerifyHash's hash is the hash of no line in the
+// log: the entry it was taken from has been cut, rewritten or rotated
+// away.
+var ErrHashNotFound = errors.New("audit: that hash is not the hash of any entry in the log")
+
+// VerifyHash is Verify, and also checks that hash (a LastHash noted
+// earlier) is the hash of one of the entries; Summary.HashSeq names it.
+// Since a same-user process can rewrite the whole log, a hash kept
+// somewhere else is what shows that the entries up to it are unchanged.
+func VerifyHash(path, hash string) (Summary, error) {
+	if !hashRe.MatchString(hash) {
+		return Summary{}, errors.New("audit: hash must be 64 lowercase hex characters")
+	}
+	s, err := verify(path, hash)
+	if err == nil && s.HashSeq == 0 {
+		return s, ErrHashNotFound
+	}
+	return s, err
+}
+
+func verify(path, hash string) (Summary, error) {
 	var s Summary
 	files, err := chainFiles(path)
 	if err != nil {
@@ -211,6 +235,9 @@ func Verify(path string) (Summary, error) {
 				}
 			}
 			prevHash = hashLine(line)
+			if hash != "" && prevHash == hash {
+				s.HashSeq = en.Seq
+			}
 			expectSeq = en.Seq + 1
 			s.LastSeq = en.Seq
 			s.Events++
