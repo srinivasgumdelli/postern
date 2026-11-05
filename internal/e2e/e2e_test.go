@@ -144,8 +144,10 @@ type world struct {
 }
 
 // setup builds two initialised, cross-pinned bridges and a relay in
-// mtls mode that knows both client certificates.
-func setup(t *testing.T) *world {
+// mtls mode that knows both client certificates. Each relayPeers
+// function may edit the relay's peer-to-fingerprint map before the
+// relay starts (to make it reject one bridge, say).
+func setup(t *testing.T, relayPeers ...func(map[string][]string)) *world {
 	t.Helper()
 	w := &world{ca: tlstest.NewCA(t), relayLog: &syncBuffer{}}
 	caFile := filepath.Join(t.TempDir(), "ca.pem")
@@ -201,6 +203,11 @@ func setup(t *testing.T) *world {
 	w.a.runSub(t, 0, "peer", "add", "--name", "peer-b", "--public-key", keys["peer-b"][0], "--fingerprint", keys["peer-b"][1])
 	w.b.runSub(t, 0, "peer", "add", "--name", "peer-a", "--public-key", keys["peer-a"][0], "--fingerprint", keys["peer-a"][1])
 
+	peers := map[string][]string{"peer-a": {fps["peer-a"]}, "peer-b": {fps["peer-b"]}}
+	for _, f := range relayPeers {
+		f(peers)
+	}
+
 	w.relayDB = filepath.Join(t.TempDir(), "relay.db")
 	st, err := relay.OpenStore(w.relayDB)
 	if err != nil {
@@ -211,7 +218,7 @@ func setup(t *testing.T) *world {
 		Identity: "mtls",
 		DB:       w.relayDB,
 		TLS:      tlsFiles,
-		Peers:    map[string][]string{"peer-a": {fps["peer-a"]}, "peer-b": {fps["peer-b"]}},
+		Peers:    peers,
 	}, st, slog.New(slog.NewJSONHandler(w.relayLog, nil)))
 	if err != nil {
 		t.Fatal(err)
