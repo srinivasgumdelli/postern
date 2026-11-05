@@ -48,7 +48,7 @@ All three ship in v0.
 
    Earlier versions of the installer matched `PostToolUse` to `mcp__postern__check_inbox` only. Running the install again replaces that entry with the match-all one, provided you have not edited it; an edited entry makes the install stop and ask you to remove it.
 
-   The installer runs `claude --version` and refuses to install for a Claude Code release older than 2.1.295, or when it cannot tell the version (see the next step for why).
+   The installer runs `claude --version` and refuses to install for a Claude Code release older than 2.1.295, or when it cannot tell the version (see the next step for why). If you have checked the version yourself, `--skip-claude-version-check` installs anyway.
 
 3. Add the session rule from [examples/session-rule.md](../examples/session-rule.md) to the project's `CLAUDE.md`.
 

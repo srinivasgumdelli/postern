@@ -31,6 +31,8 @@ type Env struct {
 	MCPTransport mcp.Transport
 	// Executable returns the absolute path of the running binary.
 	Executable func() (string, error)
+	// ClaudeVersion returns the output of `claude --version`.
+	ClaudeVersion func() (string, error)
 	// Confirm asks the human to approve a change to what the bridge
 	// trusts (keys, peers, sessions, the config pin, the client key).
 	// reason is a short phrase for the system dialog; summary is the full
@@ -44,13 +46,14 @@ type Env struct {
 // DefaultEnv is the environment of the real binary.
 func DefaultEnv(version string) Env {
 	return Env{
-		Stdin:      os.Stdin,
-		Stdout:     os.Stdout,
-		Stderr:     os.Stderr,
-		OpenStore:  secrets.NewKeychain,
-		Executable: os.Executable,
-		Confirm:    presenceConfirm(os.Stdout, presence.Confirm),
-		Version:    version,
+		Stdin:         os.Stdin,
+		Stdout:        os.Stdout,
+		Stderr:        os.Stderr,
+		OpenStore:     secrets.NewKeychain,
+		Executable:    os.Executable,
+		ClaudeVersion: claudeVersion,
+		Confirm:       presenceConfirm(os.Stdout, presence.Confirm),
+		Version:       version,
 	}
 }
 
@@ -65,7 +68,7 @@ Setup (run these yourself; changes ask for Touch ID or your login password):
   postern cert csr [--new-key] [--out FILE]
   postern cert import FILE
   postern config pin
-  postern guard install --project DIR [--server postern]
+  postern guard install --project DIR [--server postern] [--skip-claude-version-check]
   postern guard install-codex [--skills-dir DIR]
   postern edge-check
   postern thread reset THREAD
