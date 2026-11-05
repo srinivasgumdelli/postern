@@ -24,9 +24,15 @@ import (
 // files the same mode as the main file.
 //
 // Schema 1 (plaintext content) is refused, not migrated: nothing was
-// deployed with it.
+// deployed with it. Schema 2 is migrated in place to 3, which adds the
+// seen_ids tombstones (inbound dedup that outlives pruned messages; see
+// prune.go) and the per-thread count of pruned messages.
+//
+// secure_delete is on for every connection, so deleted rows (sealed
+// content, ids, routing metadata) are overwritten with zeros instead of
+// lingering in free pages.
 
-const schemaVersion = 2
+const schemaVersion = 3
 
 var schema = []string{
 	`CREATE TABLE IF NOT EXISTS messages (
@@ -57,12 +63,38 @@ var schema = []string{
 		reset_at    INTEGER,
 		reset_seq   INTEGER NOT NULL DEFAULT 0,
 		tripped_at  INTEGER,
-		trip_reason TEXT
+		trip_reason TEXT,
+		pruned      INTEGER NOT NULL DEFAULT 0
 	)`,
 	`CREATE TABLE IF NOT EXISTS meta (
 		k TEXT PRIMARY KEY,
 		v BLOB NOT NULL
 	)`,
+	seenIDsTable,
+	seenIDsIndex,
+}
+
+// threads.pruned counts the thread's messages after reset_seq that
+// retention deleted, so the thread cap still counts them.
+//
+// seen_ids holds every inbound id for tombstoneRetention after it was
+// received, whether or not its message is still stored.
+const (
+	seenIDsTable = `CREATE TABLE IF NOT EXISTS seen_ids (
+		id      TEXT    PRIMARY KEY,
+		seen_at INTEGER NOT NULL
+	) WITHOUT ROWID`
+	seenIDsIndex = `CREATE INDEX IF NOT EXISTS seen_ids_seen_at ON seen_ids (seen_at)`
+)
+
+// migrateV2 upgrades a schema 2 database to 3 in place. Every inbound id
+// still stored becomes a tombstone dated by its arrival.
+var migrateV2 = []string{
+	seenIDsTable,
+	seenIDsIndex,
+	`INSERT OR IGNORE INTO seen_ids (id, seen_at)
+		SELECT id, created_at FROM messages WHERE direction = 'in'`,
+	`ALTER TABLE threads ADD COLUMN pruned INTEGER NOT NULL DEFAULT 0`,
 }
 
 var (
@@ -84,6 +116,7 @@ func dsn(absPath string) string {
 		"_pragma=journal_mode(WAL)",
 		"_pragma=synchronous(NORMAL)",
 		"_pragma=foreign_keys(1)",
+		"_pragma=secure_delete(1)",
 		"_txlock=immediate",
 	}
 	return "file:" + (&url.URL{Path: absPath}).EscapedPath() + "?" + strings.Join(q, "&")
@@ -157,7 +190,11 @@ func migrate(ctx context.Context, db *sql.DB) error {
 	case v == 1:
 		return errSchemaV1
 	}
-	for _, s := range schema {
+	stmts := schema
+	if v == 2 {
+		stmts = migrateV2
+	}
+	for _, s := range stmts {
 		if _, err := tx.ExecContext(ctx, s); err != nil {
 			return err
 		}
@@ -201,6 +238,7 @@ func checkInboxKey(ctx context.Context, db *sql.DB, c *inboxCrypto) error {
 type threadRow struct {
 	peer       string
 	resetSeq   int64
+	pruned     int64 // messages after resetSeq deleted by retention
 	tripped    bool
 	tripReason string
 }
@@ -212,8 +250,8 @@ func getThread(ctx context.Context, tx *sql.Tx, thread string) (threadRow, bool,
 		reason  sql.NullString
 	)
 	err := tx.QueryRowContext(ctx,
-		`SELECT peer, reset_seq, tripped_at, trip_reason FROM threads WHERE thread = ?`, thread).
-		Scan(&t.peer, &t.resetSeq, &tripped, &reason)
+		`SELECT peer, reset_seq, pruned, tripped_at, trip_reason FROM threads WHERE thread = ?`, thread).
+		Scan(&t.peer, &t.resetSeq, &t.pruned, &tripped, &reason)
 	if errors.Is(err, sql.ErrNoRows) {
 		return threadRow{}, false, nil
 	}
@@ -297,6 +335,10 @@ func (b *Bridge) threadInfo(ctx context.Context, thread string) (threadInfo, boo
 // false for a duplicate id, and a non-empty drop reason when the thread
 // already belongs to a different peer (a peer may not inject into
 // another peer's thread).
+//
+// An id is a duplicate while it is in messages or in the seen_ids
+// tombstones. Tombstones outlive the relay's replay horizon, so an id is
+// never accepted twice even after retention pruned its message.
 func (b *Bridge) storeInbound(ctx context.Context, m envelope.Message) (inserted bool, drop string, err error) {
 	now := b.now()
 	tx, err := b.db.BeginTx(ctx, nil)
@@ -304,6 +346,15 @@ func (b *Bridge) storeInbound(ctx context.Context, m envelope.Message) (inserted
 		return false, "", b.internal(ctx, "begin inbound", err)
 	}
 	defer tx.Rollback()
+	var seen bool
+	if err := tx.QueryRowContext(ctx, `
+		SELECT EXISTS (SELECT 1 FROM seen_ids WHERE id = ?)
+			OR EXISTS (SELECT 1 FROM messages WHERE id = ?)`, m.ID, m.ID).Scan(&seen); err != nil {
+		return false, "", b.internal(ctx, "inbound dedup", err)
+	}
+	if seen {
+		return false, "", nil
+	}
 	th, found, err := getThread(ctx, tx, m.Thread)
 	if err != nil {
 		return false, "", b.internal(ctx, "load thread", err)
@@ -332,6 +383,10 @@ func (b *Bridge) storeInbound(ctx context.Context, m envelope.Message) (inserted
 	n, err := res.RowsAffected()
 	if err != nil {
 		return false, "", b.internal(ctx, "insert inbound", err)
+	}
+	if _, err := tx.ExecContext(ctx,
+		`INSERT OR IGNORE INTO seen_ids (id, seen_at) VALUES (?, ?)`, m.ID, now.UnixMilli()); err != nil {
+		return false, "", b.internal(ctx, "insert seen id", err)
 	}
 	if err := tx.Commit(); err != nil {
 		return false, "", b.internal(ctx, "commit inbound", err)
@@ -494,7 +549,7 @@ func ResetThread(ctx context.Context, dbPath, thread string) error {
 		return resetErr(ctx)
 	}
 	res, err := tx.ExecContext(ctx, `
-		UPDATE threads SET tripped_at = NULL, trip_reason = NULL, reset_at = ?, reset_seq = ?
+		UPDATE threads SET tripped_at = NULL, trip_reason = NULL, reset_at = ?, reset_seq = ?, pruned = 0
 		WHERE thread = ?`, time.Now().UnixMilli(), maxSeq, thread)
 	if err != nil {
 		return resetErr(ctx)

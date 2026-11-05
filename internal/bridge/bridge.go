@@ -6,8 +6,9 @@
 // process, which calls Open and then Run. Several such processes on one
 // machine share one SQLite file and poll the same relay mailbox, so every
 // state change is safe across processes: WAL mode, a busy timeout, BEGIN
-// IMMEDIATE for every check-then-insert, INSERT OR IGNORE for inbound
-// dedup, leases on outbox rows and idempotent acks.
+// IMMEDIATE for every check-then-insert, id tombstones for inbound dedup,
+// leases on outbox rows, idempotent acks and retention pruning in small
+// batches (prune.go).
 //
 // Logging: the logger only ever sees ids, threads, peer names, status
 // codes, counts and short reason codes. Subjects, bodies, session names,
@@ -109,6 +110,10 @@ type Options struct {
 	DBPath string
 	// Limits are the outbound limits; zero fields take defaults.
 	Limits Limits
+	// MessageRetention is how long inbound and delivered outbound messages
+	// are kept in the local database. Zero means 30 days; otherwise it
+	// must be between 1 and 3650 days. See prune.go for the other rules.
+	MessageRetention time.Duration
 	// Logger receives metadata-only logs. nil discards.
 	Logger *slog.Logger
 	// Now is the clock. nil = time.Now.
@@ -170,6 +175,7 @@ type Bridge struct {
 	peerNames []string
 	scanner   func(subject, body string) error
 	limits    Limits
+	retention time.Duration
 	log       *slog.Logger
 	nowFn     func() time.Time
 	db        *sql.DB
@@ -252,6 +258,10 @@ func Open(opts Options) (*Bridge, error) {
 	if err != nil {
 		return nil, err
 	}
+	retention, err := messageRetention(opts.MessageRetention)
+	if err != nil {
+		return nil, err
+	}
 	pt := opts.PollTimeout
 	switch {
 	case pt < 0:
@@ -295,6 +305,7 @@ func Open(opts Options) (*Bridge, error) {
 		peerNames: names,
 		scanner:   opts.Scanner,
 		limits:    lim,
+		retention: retention,
 		log:       log,
 		nowFn:     now,
 		db:        db,
@@ -306,6 +317,9 @@ func Open(opts Options) (*Bridge, error) {
 		onceLogged: map[string]struct{}{},
 		closed:     make(chan struct{}),
 	}
+	// Prune once now (Run repeats it hourly). A failure is logged, not
+	// fatal: the next pass retries.
+	b.runPrune(context.Background())
 	b.log.Info("bridge opened", "peer", b.self, "peers", len(peers))
 	return b, nil
 }
@@ -328,8 +342,9 @@ func (b *Bridge) Close() error {
 	return err
 }
 
-// Run polls the relay and retries the outbox until ctx is done or the
-// bridge is closed. It returns nil on a clean stop.
+// Run polls the relay, retries the outbox and prunes the local database
+// (hourly) until ctx is done or the bridge is closed. It returns nil on a
+// clean stop.
 func (b *Bridge) Run(ctx context.Context) error {
 	b.runMu.Lock()
 	if b.isClosed {
@@ -349,9 +364,10 @@ func (b *Bridge) Run(ctx context.Context) error {
 		}
 	}()
 	var wg sync.WaitGroup
-	wg.Add(2)
+	wg.Add(3)
 	go func() { defer wg.Done(); b.pollLoop(ctx) }()
 	go func() { defer wg.Done(); b.outboxLoop(ctx) }()
+	go func() { defer wg.Done(); b.pruneLoop(ctx) }()
 	b.log.Info("bridge running")
 	wg.Wait()
 	b.log.Info("bridge stopped")
@@ -526,7 +542,7 @@ func (b *Bridge) insertOutbound(ctx context.Context, o outgoing, m envelope.Mess
 		if th.tripped {
 			return trippedErr(o.thread, th.tripReason)
 		}
-		reason, err := threadLimitReason(ctx, tx, b.limits, o.thread, th.resetSeq, now)
+		reason, err := threadLimitReason(ctx, tx, b.limits, o.thread, th.resetSeq, th.pruned, now)
 		if err != nil {
 			return b.internal(ctx, "thread limits", err)
 		}
