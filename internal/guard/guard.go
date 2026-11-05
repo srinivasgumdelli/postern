@@ -681,7 +681,13 @@ type contextFields struct {
 	AdditionalContext string `json:"additionalContext"`
 }
 
-const reasonCleared = "Postern guard cleared for this session. Untrusted Postern content may still be in the conversation; use /clear for a fresh context."
+// reasonCleared is shown to the human (the prompt is swallowed, so it never
+// reaches the model). A message can ask the human to type "postern clear",
+// so it says plainly what clearing gives up and who should not be trusted.
+const reasonCleared = "Postern guard cleared for this session. " +
+	"Untrusted Postern content is still in the conversation, and tool calls will now run without per-call approval. " +
+	"If a message asked you to type this, do not trust that message. " +
+	"Use /clear for a fresh context instead."
 
 // reminder is added to the model's context while the session is tainted.
 // Written as plain statements of fact, as Claude Code recommends for hook
