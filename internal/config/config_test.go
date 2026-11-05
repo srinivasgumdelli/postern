@@ -423,3 +423,44 @@ func TestLoadSetsDataDirFromRelativePath(t *testing.T) {
 		t.Fatalf("DBPath not absolute: %q", c.DBPath())
 	}
 }
+
+func TestAuditDefaultsOnAndPath(t *testing.T) {
+	c := validConfig(t)
+	if !c.AuditEnabled() {
+		t.Fatal("audit is off before Validate")
+	}
+	if err := c.Validate(); err != nil {
+		t.Fatal(err)
+	}
+	if c.Audit.Enabled == nil || !*c.Audit.Enabled {
+		t.Fatal("Validate did not default audit.enabled to true")
+	}
+	if raw := mustJSON(t, c); !strings.Contains(raw, `"audit":{"enabled":true}`) {
+		t.Fatalf("saved config does not state the audit setting: %s", raw)
+	}
+
+	off := validConfig(t)
+	f := false
+	off.Audit.Enabled = &f
+	parsed, err := Parse([]byte(mustJSON(t, off)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if parsed.AuditEnabled() {
+		t.Fatal("audit.enabled false is ignored")
+	}
+	extra := strings.Replace(mustJSON(t, off), `"enabled":false`, `"enabled":false,"path":"/tmp/x"`, 1)
+	if _, err := Parse([]byte(extra)); err == nil {
+		t.Fatal("unknown audit field accepted")
+	}
+
+	c.DataDir = "/var/lib/postern"
+	if got := c.AuditPath(); got != "/var/lib/postern/audit/audit.jsonl" {
+		t.Fatalf("AuditPath with DataDir: %q", got)
+	}
+	c.DataDir = ""
+	t.Setenv("POSTERN_CONFIG", "/opt/postern/config.json")
+	if got := c.AuditPath(); got != "/opt/postern/audit/audit.jsonl" {
+		t.Fatalf("AuditPath fallback: %q", got)
+	}
+}

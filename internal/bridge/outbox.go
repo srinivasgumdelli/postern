@@ -7,6 +7,7 @@ import (
 	"strings"
 	"time"
 
+	"postern/internal/audit"
 	"postern/internal/envelope"
 )
 
@@ -82,7 +83,13 @@ func (b *Bridge) attempt(ctx context.Context, r outRow) attemptResult {
 
 // record stores the result of an attempt. It runs even if ctx was
 // cancelled, so a delivered message is not left looking pending.
-func (b *Bridge) record(ctx context.Context, r outRow, res attemptResult) {
+//
+// first is true for the attempt Send or Reply makes before returning. It
+// is audited as sent or queued; a later attempt is audited only when it
+// delivers (delivered) or fails for good (rejected), so a long outage
+// does not fill the audit log with retries.
+func (b *Bridge) record(ctx context.Context, r outRow, res attemptResult, first bool) {
+	defer b.auditAttempt(r, res, first)
 	ctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), recordTimeout)
 	defer cancel()
 	now := b.now()
@@ -117,6 +124,26 @@ func (b *Bridge) record(ctx context.Context, r outRow, res attemptResult) {
 		// a repeat post of a delivered id gets 409, which counts as sent.
 		b.log.Error("store error", "op", "record attempt", "id", r.id, "err", err.Error())
 	}
+}
+
+func (b *Bridge) auditAttempt(r outRow, res attemptResult, first bool) {
+	e := audit.Event{
+		Peer: r.peer, Session: r.session, Thread: r.thread, ID: r.id,
+		SizeBytes: int64(len(r.body)), Status: res.status, Reason: res.reason,
+	}
+	switch {
+	case res.outcome == outDelivered && first:
+		e.Event = audit.EventSent
+	case res.outcome == outDelivered:
+		e.Event = audit.EventDelivered
+	case res.outcome == outPermanent:
+		e.Event = audit.EventRejected
+	case first:
+		e.Event = audit.EventQueued
+	default:
+		return
+	}
+	b.audit(e)
 }
 
 // claim leases up to limit pending rows to this process. With force it
@@ -158,7 +185,12 @@ func (b *Bridge) claim(ctx context.Context, force bool, limit int) ([]outRow, er
 	if err != nil {
 		return nil, b.internal(ctx, "claim expired", err)
 	}
-	var gaveUp []string
+	var (
+		gaveUp []string
+		// notes are audited after the commit, never while the database
+		// write lock is held.
+		notes []audit.Event
+	)
 	for expired.Next() {
 		var id, thread, peer string
 		if err := expired.Scan(&id, &thread, &peer); err != nil {
@@ -166,6 +198,7 @@ func (b *Bridge) claim(ctx context.Context, force bool, limit int) ([]outRow, er
 			return nil, b.internal(ctx, "claim expired", err)
 		}
 		gaveUp = append(gaveUp, id)
+		notes = append(notes, audit.Event{Event: audit.EventRejected, Peer: peer, Thread: thread, ID: id, Reason: "expired"})
 		b.log.Warn("outbound expired", "id", id, "thread", thread, "peer", peer)
 	}
 	expired.Close()
@@ -213,6 +246,7 @@ func (b *Bridge) claim(ctx context.Context, force bool, limit int) ([]outRow, er
 			// rows behind it.
 			b.logUnreadable(r.id)
 			unreadable = append(unreadable, r.id)
+			notes = append(notes, audit.Event{Event: audit.EventRejected, Peer: r.peer, Thread: r.thread, ID: r.id, Reason: "unreadable"})
 			continue
 		}
 		r.session, r.subject, r.body = rc.Session, rc.Subject, rc.Body
@@ -236,6 +270,9 @@ func (b *Bridge) claim(ctx context.Context, force bool, limit int) ([]outRow, er
 	}
 	if err := tx.Commit(); err != nil {
 		return nil, b.internal(ctx, "commit claim", err)
+	}
+	for _, e := range notes {
+		b.audit(e)
 	}
 	return out, nil
 }
@@ -275,7 +312,7 @@ func (b *Bridge) flush(ctx context.Context, force bool) (delivered int, deferred
 			actx, cancel := context.WithTimeout(ctx, sendAttemptTimeout)
 			res := b.attempt(actx, r)
 			cancel()
-			b.record(ctx, r, res)
+			b.record(ctx, r, res, false)
 			switch res.outcome {
 			case outDelivered:
 				delivered++

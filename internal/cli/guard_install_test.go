@@ -27,6 +27,8 @@ func TestGuardInstallChecksClaudeVersion(t *testing.T) {
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
 			dir := t.TempDir()
+			// Never look at a real config on the machine running the tests.
+			t.Setenv("POSTERN_CONFIG", filepath.Join(dir, "no-config.json"))
 			var stderr bytes.Buffer
 			env := Env{
 				Stdin: strings.NewReader(""), Stdout: &bytes.Buffer{}, Stderr: &stderr,

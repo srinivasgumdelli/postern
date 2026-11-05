@@ -7,6 +7,7 @@ import (
 	"os"
 	"time"
 
+	"postern/internal/audit"
 	"postern/internal/secrets"
 	"postern/internal/tlsutil"
 )
@@ -84,6 +85,7 @@ func cmdCertImport(env Env, args []string) error {
 	if err != nil {
 		return err
 	}
+	event := audit.EventCertImport
 	switch {
 	case tlsutil.CertMatchesKey(cert, current):
 	default:
@@ -110,10 +112,12 @@ func cmdCertImport(env Env, args []string) error {
 			return fmt.Errorf("remove pending key: %w", err)
 		}
 		fmt.Fprintln(env.Stdout, "Rotated: the new client key is now active.")
+		event = audit.EventCertRotate
 	}
 	if err := l.store.Set(secrets.TLSCertificate, pemBytes); err != nil {
 		return fmt.Errorf("store certificate: %w", err)
 	}
+	recordTrust(env, l.cfg, false, audit.Event{Event: event, Peer: l.cfg.PeerName})
 	fmt.Fprintf(env.Stdout, "Imported client certificate for %s.\nSHA-256: %s\nExpires: %s\n",
 		l.cfg.PeerName, tlsutil.Fingerprint(cert.Raw), cert.NotAfter.UTC().Format(time.RFC3339))
 	fmt.Fprintln(env.Stdout, "Add the SHA-256 under this peer in the relay's relay.json, then run `postern edge-check`.")

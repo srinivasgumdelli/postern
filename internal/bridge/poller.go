@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"time"
 
+	"postern/internal/audit"
 	"postern/internal/envelope"
 	"postern/internal/ulid"
 )
@@ -127,6 +128,13 @@ func (b *Bridge) process(ctx context.Context, raw json.RawMessage) (handled, isN
 	}
 	if reason != "" {
 		b.log.Warn("inbound dropped", "id", id, "reason", reason)
+		// The outer from is chosen by whoever posted the envelope; record
+		// it only if it names a pinned peer.
+		peer := ""
+		if _, ok := b.peers[e.From]; ok {
+			peer = e.From
+		}
+		b.audit(audit.Event{Event: audit.EventDropped, Peer: peer, ID: id, Reason: reason})
 	}
 	if id == "" {
 		// Without a valid id it cannot be acked; it expires at the relay.
@@ -176,6 +184,12 @@ func (b *Bridge) accept(ctx context.Context, e envelope.Envelope) (reason string
 	}
 	if inserted {
 		b.log.Info("inbound stored", "id", m.ID, "thread", m.Thread, "peer", m.From)
+		// No session: the sending session's name is the other machine's
+		// content (sealed in the inbox), not local metadata.
+		b.audit(audit.Event{
+			Event: audit.EventReceived, Peer: m.From, Thread: m.Thread, ID: m.ID,
+			SizeBytes: int64(len(m.Body)),
+		})
 	} else {
 		b.log.Debug("inbound duplicate", "id", m.ID)
 	}

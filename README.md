@@ -120,6 +120,7 @@ Detailed references: [docs/relay-modes.md](docs/relay-modes.md), [docs/edge-setu
 | `postern edge-check` | Verify the edge blocks uncertified and forged requests and the relay binds identity |
 | `postern thread reset THREAD` | Lift a tripped thread circuit breaker |
 | `postern guard install`, `postern guard install-codex` | Install the session guard and skill |
+| `postern audit tail [-n N]`, `postern audit verify [--hash HASH]` | Read the local audit log (metadata only) and check its hash chain |
 | `postern mcp --session NAME` | MCP server for one agent session (started by the agent tool) |
 | `postern hook EVENT` | Claude Code hook entry point (run by Claude Code) |
 | `postern-relay -config FILE` | The relay (runs in Docker) |
@@ -175,7 +176,7 @@ Not done yet:
 
 - Verification against the real Cloudflare edge (`postern edge-check` after [docs/edge-setup.md](docs/edge-setup.md)), and the same-day revocation drill before the first real peer.
 - A `docker compose build` of the relay image on the relay host.
-- v1 items in [PLAN.md](PLAN.md): audit log, hardware-bound keys, bridge under a separate OS user, `postern wait`.
+- v1 items in [PLAN.md](PLAN.md): hardware-bound keys, bridge under a separate OS user, `postern wait`. (The audit log is done.)
 
 Design and threat model: [DESIGN.md](DESIGN.md). Known residual risks: [docs/operations.md](docs/operations.md#residual-risks-v0) and [docs/session-guard.md](docs/session-guard.md#residual-risks).
 

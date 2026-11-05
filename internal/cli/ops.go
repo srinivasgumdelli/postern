@@ -15,6 +15,7 @@ import (
 	"strings"
 	"time"
 
+	"postern/internal/audit"
 	"postern/internal/bridge"
 	"postern/internal/guard"
 	"postern/internal/tlsutil"
@@ -35,6 +36,7 @@ func cmdThreadReset(ctx context.Context, env Env, args []string) error {
 	if err := bridge.ResetThread(ctx, l.cfg.DBPath(), fs.Arg(0)); err != nil {
 		return err
 	}
+	recordTrust(env, l.cfg, false, audit.Event{Event: audit.EventThreadReset, Thread: fs.Arg(0)})
 	fmt.Fprintf(env.Stdout, "Thread %s reset; its message counts start over now.\n", fs.Arg(0))
 	return nil
 }
@@ -44,6 +46,7 @@ func cmdGuardInstall(env Env, args []string) error {
 	fs.SetOutput(env.Stderr)
 	project := fs.String("project", ".", "project directory of the Claude Code session")
 	server := fs.String("server", "postern", "name the Postern MCP server was added under")
+	cfgFlag := fs.String("config", "", "config file, for the audit log (default $POSTERN_CONFIG or the user config dir)")
 	skip := fs.Bool("skip-claude-version-check", false, "install even if `claude --version` cannot confirm a release that blocks on hook failure")
 	if err := fs.Parse(args); err != nil {
 		return err
@@ -69,6 +72,7 @@ func cmdGuardInstall(env Env, args []string) error {
 	if err := guard.InstallClaudeCode(dir, exe, *server); err != nil {
 		return err
 	}
+	recordGuardInstall(env, *cfgFlag, "claude-code")
 	fmt.Fprintf(env.Stdout, "Installed Postern hooks in %s, the /postern-clear command and the postern skill.\n",
 		filepath.Join(dir, ".claude", "settings.json"))
 	fmt.Fprintln(env.Stdout, "Also add the session rule (examples/session-rule.md) to the project's CLAUDE.md, and never run this session in bypass mode.")
@@ -82,6 +86,7 @@ func cmdGuardInstallCodex(env Env, args []string) error {
 	fs := flag.NewFlagSet("postern guard install-codex", flag.ContinueOnError)
 	fs.SetOutput(env.Stderr)
 	dir := fs.String("skills-dir", "", "Codex skills directory (default $CODEX_HOME/skills or ~/.codex/skills)")
+	cfgFlag := fs.String("config", "", "config file, for the audit log (default $POSTERN_CONFIG or the user config dir)")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
@@ -100,6 +105,7 @@ func cmdGuardInstallCodex(env Env, args []string) error {
 	if err != nil {
 		return err
 	}
+	recordGuardInstall(env, *cfgFlag, "codex")
 	fmt.Fprintf(env.Stdout, "Installed the postern skill at %s.\n", path)
 	fmt.Fprintln(env.Stdout, "Also mark the project untrusted and set Postern's tool approvals as in examples/codex/config.toml.")
 	return nil

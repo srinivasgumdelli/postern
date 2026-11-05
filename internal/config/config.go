@@ -64,6 +64,7 @@ type Config struct {
 	Sessions        []string     `json:"sessions"`
 	Peers           []PeerConfig `json:"peers"`
 	Limits          Limits       `json:"limits"`
+	Audit           Audit        `json:"audit"`
 
 	// path is the absolute path the config was loaded from or saved to.
 	path string
@@ -90,6 +91,19 @@ type Limits struct {
 	ThreadBurstWindowMinutes int `json:"thread_burst_window_minutes"`
 	MessageRetentionDays     int `json:"message_retention_days"`
 }
+
+// Audit controls the local audit log (internal/audit): an append-only,
+// metadata-only JSONL file in DataDir/audit. Enabled defaults to true;
+// Validate fills it in, so a saved config always states it.
+type Audit struct {
+	Enabled *bool `json:"enabled,omitempty"`
+}
+
+// AuditDir is the audit log directory inside the data directory.
+const AuditDir = "audit"
+
+// AuditFile is the active audit log file name inside AuditDir.
+const AuditFile = "audit.jsonl"
 
 var serviceRe = regexp.MustCompile(`^[a-z0-9][a-z0-9.-]{0,63}$`)
 
@@ -232,8 +246,8 @@ func checkKeys(raw []byte) error {
 	}
 }
 
-// Validate checks every field and fills KeychainService with its
-// default when empty. Error messages name the field, not its value.
+// Validate checks every field and fills KeychainService and
+// Audit.Enabled with their defaults when empty. Error messages name the field, not its value.
 func (c *Config) Validate() error {
 	if c == nil {
 		return invalid("nil config")
@@ -256,6 +270,10 @@ func (c *Config) Validate() error {
 	// directory, giving sessions on one machine different inboxes.
 	if c.DataDir != "" && !filepath.IsAbs(c.DataDir) {
 		return invalid("data_dir must be an absolute path")
+	}
+	if c.Audit.Enabled == nil {
+		on := true
+		c.Audit.Enabled = &on
 	}
 
 	seen := make(map[string]bool, len(c.Sessions))
@@ -423,6 +441,30 @@ func (c *Config) Peer(name string) (PeerConfig, bool) {
 // DefaultPath when the config was neither loaded nor saved). It returns
 // "" only if no directory can be determined.
 func (c *Config) DBPath() string {
+	dir := c.dataDir()
+	if dir == "" {
+		return ""
+	}
+	return filepath.Join(dir, DBFile)
+}
+
+// AuditPath returns the active audit log path: DataDir/audit/audit.jsonl
+// (DataDir defaults as for DBPath). It returns "" only if no directory
+// can be determined.
+func (c *Config) AuditPath() string {
+	dir := c.dataDir()
+	if dir == "" {
+		return ""
+	}
+	return filepath.Join(dir, AuditDir, AuditFile)
+}
+
+// AuditEnabled reports whether the audit log is on (the default).
+func (c *Config) AuditEnabled() bool {
+	return c.Audit.Enabled == nil || *c.Audit.Enabled
+}
+
+func (c *Config) dataDir() string {
 	dir := c.DataDir
 	if dir == "" && c.path != "" {
 		dir = filepath.Dir(c.path)
@@ -437,7 +479,7 @@ func (c *Config) DBPath() string {
 		}
 		dir = filepath.Dir(p)
 	}
-	return filepath.Join(dir, DBFile)
+	return dir
 }
 
 // EffectiveLimits returns Limits with zero fields replaced by defaults.
