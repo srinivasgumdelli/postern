@@ -199,7 +199,7 @@ Security, WAF, Custom rules, Create rule:
 
 - Action: **Block**.
 
-Both conditions are needed: `cert_verified` is still true for a valid certificate that has been revoked. The free plan has a small number of custom rules (verify against current Cloudflare docs). This rule must stay enabled and scoped to this hostname.
+Both conditions are needed: `cert_verified` is still true for a valid certificate that has been revoked. The Free plan allows 5 custom rules (checked 2026-11-05, see the limits table in [relay-modes.md](relay-modes.md#free-plan-limits); plans change). This rule must stay enabled and scoped to this hostname.
 
 ## 8. Transform rule: set the fingerprint and edge secret headers
 
