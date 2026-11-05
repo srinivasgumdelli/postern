@@ -173,11 +173,22 @@ func (e Envelope) ValidateOuter() error {
 	return nil
 }
 
-// ParseEnvelope decodes one JSON envelope strictly (no unknown fields,
-// no trailing data) and validates its outer fields.
+// envelopeKeys are the only keys an envelope object may have.
+var envelopeKeys = map[string]bool{
+	"v": true, "id": true, "from": true, "to": true,
+	"thread": true, "ts": true, "nonce": true, "box": true,
+}
+
+// ParseEnvelope decodes one JSON envelope strictly (no unknown,
+// duplicate or case-folded keys, no trailing data) and validates its
+// outer fields. Every relay implementation must accept exactly the same
+// envelopes: testdata/conformance holds the cases they share.
 func ParseEnvelope(data []byte) (Envelope, error) {
 	if len(data) > MaxEnvelopeBytes {
 		return Envelope{}, ErrTooLarge
+	}
+	if err := checkKeys(data, envelopeKeys); err != nil {
+		return Envelope{}, invalid("json")
 	}
 	var e Envelope
 	if err := decodeStrict(data, &e); err != nil {
@@ -343,6 +354,39 @@ func Fingerprint(pub *[KeySize]byte) string {
 		groups = append(groups, h[i:i+4])
 	}
 	return strings.Join(groups, " ")
+}
+
+// checkKeys rejects a top-level JSON object that has a key not exactly
+// in allowed, or the same key twice. encoding/json alone matches keys
+// case-insensitively and keeps the last of two duplicates, which parsers
+// in other languages do not reproduce. Anything that is not an object is
+// left to decodeStrict.
+func checkKeys(data []byte, allowed map[string]bool) error {
+	dec := json.NewDecoder(bytes.NewReader(data))
+	tok, err := dec.Token()
+	if err != nil {
+		return err
+	}
+	if d, ok := tok.(json.Delim); !ok || d != '{' {
+		return nil
+	}
+	seen := make(map[string]bool, len(allowed))
+	for dec.More() {
+		tok, err := dec.Token()
+		if err != nil {
+			return err
+		}
+		key, ok := tok.(string)
+		if !ok || !allowed[key] || seen[key] {
+			return errors.New("unexpected key")
+		}
+		seen[key] = true
+		var skip json.RawMessage
+		if err := dec.Decode(&skip); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 func decodeStrict(data []byte, v any) error {

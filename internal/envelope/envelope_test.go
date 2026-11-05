@@ -216,6 +216,14 @@ func TestParseEnvelopeStrict(t *testing.T) {
 	if _, err := ParseEnvelope([]byte(extra)); !errors.Is(err, ErrInvalid) {
 		t.Fatalf("unknown field: got %v", err)
 	}
+	dup := strings.Replace(string(raw), `"v":1`, `"v":1,"v":1`, 1)
+	if _, err := ParseEnvelope([]byte(dup)); !errors.Is(err, ErrInvalid) {
+		t.Fatalf("duplicate key: got %v", err)
+	}
+	folded := strings.Replace(string(raw), `"id":`, `"ID":`, 1)
+	if _, err := ParseEnvelope([]byte(folded)); !errors.Is(err, ErrInvalid) {
+		t.Fatalf("case-folded key: got %v", err)
+	}
 	if _, err := ParseEnvelope(append(raw, []byte(`{}`)...)); !errors.Is(err, ErrInvalid) {
 		t.Fatalf("trailing data: got %v", err)
 	}
