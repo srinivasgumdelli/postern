@@ -50,6 +50,12 @@ These real files are gitignored. `deploy/relay.json` holds certificate fingerpri
 Generate the edge secret. It never appears on the terminal, in argv or in shell history:
 
 ```sh
+deploy/scripts/gen-edge-secret.sh
+```
+
+It writes `deploy/secrets/edge-secret` from `openssl rand -hex 32` with umask 077 and mode 0400, refuses to overwrite an existing file (`--force`; to change a live secret, rotate instead), and prints only the path. `--dry-run` says what it would write. Without the script:
+
+```sh
 (umask 077 && openssl rand -hex 32 > deploy/secrets/edge-secret)
 chmod 0400 deploy/secrets/edge-secret
 ```
@@ -94,7 +100,9 @@ Store it in the operator's login keychain. With `-w` last, `security` prompts fo
 security add-generic-password -a operator -s postern-edge-token -w
 ```
 
-Every API call below reads the token from the keychain and pipes the `Authorization` header into `curl` on stdin (`-H @-`, curl 7.55 or later). The token is never an argument, never an environment variable, never in a file:
+The operator scripts in `deploy/scripts/` (`issue-cert.sh`, `revoke-cert.sh`) read the token from this keychain item (`security find-generic-password -s postern-edge-token -w`), or from a mode 0600 file given with `--token-file`, and hand it to `curl` only as a header line on stdin (`-H @-`): never in argv, never in the environment, never written to disk, never printed. They run `curl -q` so no `~/.curlrc` applies, and need `curl` 7.76 or later (`--fail-with-body`), `openssl` and `python3` 3.8 or later, which they use for all JSON; they check for each before doing anything. Every script has `--help`, and `--dry-run` prints the exact request with the token shown as `[REDACTED]`, without reading the token.
+
+For the manual commands below, and as a fallback to the scripts, this helper does the same with a pipe: it reads the token from the keychain and pipes the `Authorization` header into `curl` on stdin (`-H @-`, curl 7.55 or later). The token is never an argument, never an environment variable, never in a file:
 
 ```sh
 cfapi() {
@@ -122,7 +130,18 @@ Also, for the zone or hostname: minimum TLS version 1.2 or later. Enabling mTLS 
 
 ## 5. Issue a client certificate per bridge
 
-Each bridge prints a CSR (`postern init` or `postern cert csr`); the private key never leaves that machine's keychain. Copy the CSR to the operator, for example as `peer-a.csr`. Then:
+Each bridge prints a CSR (`postern init` or `postern cert csr`); the private key never leaves that machine's keychain. Copy the CSR to the operator, for example as `peer-a.csr` in a scratch directory outside the repo (here `~/postern-certs`). Then, from the repo checkout:
+
+```sh
+deploy/scripts/issue-cert.sh --zone <ZONE_ID> --csr ~/postern-certs/peer-a.csr --dry-run   # optional: shows the request
+deploy/scripts/issue-cert.sh --zone <ZONE_ID> --csr ~/postern-certs/peer-a.csr             # writes ~/postern-certs/peer-a.pem, 14 days
+```
+
+`--days N` and `--out FILE` override the defaults; an existing `--out` file is not overwritten without `--force`.
+
+The script checks the CSR with `openssl`, `POST`s it to `/zones/<ZONE_ID>/client_certificates` as `{"csr": ..., "validity_days": 14}`, and reads `result.certificate`, `result.id`, `result.fingerprint_sha256`, `result.expires_on` and `result.status` from the response. It computes the certificate's SHA-256 itself and writes `peer-a.pem` only if that matches `fingerprint_sha256` and the certificate carries the CSR's public key; otherwise it writes nothing and names the certificate id to revoke. It prints `<CERT_ID>` and the fingerprint. It compares fingerprints after lower-casing and removing colons and spaces, because the exact format of `fingerprint_sha256` could not be confirmed (verify against current Cloudflare docs). `--zone` must be the 32 lowercase hex characters the dashboard shows.
+
+The same by hand, in the scratch directory:
 
 ```sh
 jq -n --rawfile csr peer-a.csr '{csr: $csr, validity_days: 14}' > peer-a-req.json
@@ -134,7 +153,7 @@ jq -r '.result.id, .result.fingerprint_sha256, .result.expires_on' peer-a-resp.j
 
 - Validity is about 14 days and certificates rotate weekly (one week of overlap). Whether the API enforces a minimum or maximum `validity_days`: verify against current Cloudflare docs.
 - A zone can hold up to 100 active certificates from the Cloudflare-managed CA. Revoked ones do not count.
-- Compute the fingerprint yourself; it must match what `postern cert import peer-a.pem` prints on the bridge:
+- Compute the fingerprint yourself (the script does this for you); it must match what `postern cert import peer-a.pem` prints on the bridge:
 
   ```sh
   openssl x509 -in peer-a.pem -outform DER | shasum -a 256 | cut -d' ' -f1
@@ -147,12 +166,28 @@ Repeat for `peer-b`.
 ### Revoke
 
 ```sh
+deploy/scripts/revoke-cert.sh --zone <ZONE_ID> --id <CERT_ID>
+# or, without the id, by the certificate's SHA-256 fingerprint:
+deploy/scripts/revoke-cert.sh --zone <ZONE_ID> --fingerprint <PEER_B_CERT_SHA256> --lookup-only   # prints the id only
+deploy/scripts/revoke-cert.sh --zone <ZONE_ID> --fingerprint <PEER_B_CERT_SHA256>
+```
+
+It asks you to type `revoke` (or pass `--yes`), sends `DELETE /zones/<ZONE_ID>/client_certificates/<CERT_ID>`, and prints the status from the response. `--fingerprint` first lists the zone's certificates page by page (`?per_page=50&page=N`, stopping at `result_info.total_pages`) to find the id; those pagination parameters could not be confirmed (verify against current Cloudflare docs), so the script also stops on an empty, short or repeated page. `--dry-run` prints the requests. By hand:
+
+```sh
 cfapi -X DELETE "https://api.cloudflare.com/client/v4/zones/<ZONE_ID>/client_certificates/<CERT_ID>"
 ```
 
-Revocation is asynchronous: the status moves from `pending_revocation` to `revoked`. How quickly the edge enforces it: verify against current Cloudflare docs, and measure it during the revocation drill ([operations.md](operations.md)). Then remove that fingerprint from `relay.json` and restart the relay, so the relay rejects it too. If it was the peer's only fingerprint, replace it instead (step 6): the relay refuses to start with a peer that has none.
+Revocation is asynchronous: the status moves from `pending_revocation` to `revoked`. How quickly the edge enforces it: verify against current Cloudflare docs, and measure it during the revocation drill ([operations.md](operations.md)). Then cut the fingerprint off at the relay too, and restart it. The script reminds you: replace the fingerprint with one that matches no certificate rather than deleting it, because the relay refuses to start with a peer that has none (step 6):
 
-List certificates (to audit, or to find a `<CERT_ID>`):
+```sh
+deploy/scripts/add-fingerprint.sh --peer peer-b --replace <PEER_B_CERT_SHA256> --fingerprint "$(openssl rand -hex 32)"
+docker compose restart relay
+```
+
+(If the peer already lists its replacement certificate, `--remove --fingerprint <PEER_B_CERT_SHA256>` instead.)
+
+List certificates (to audit, or to find a `<CERT_ID>` by hand):
 
 ```sh
 cfapi "https://api.cloudflare.com/client/v4/zones/<ZONE_ID>/client_certificates" \
@@ -162,6 +197,13 @@ cfapi "https://api.cloudflare.com/client/v4/zones/<ZONE_ID>/client_certificates"
 (Filter and pagination parameters: verify against current Cloudflare docs.)
 
 ## 6. Put the fingerprints in relay.json
+
+```sh
+deploy/scripts/add-fingerprint.sh --peer peer-a --fingerprint <PEER_A_CERT_SHA256>
+deploy/scripts/add-fingerprint.sh --peer peer-b --fingerprint <PEER_B_CERT_SHA256>
+```
+
+The script edits `deploy/relay.json` (or another file with `--relay-json`) as JSON: it accepts only 64 lowercase hex characters (as `postern cert import` and `issue-cert.sh` print them), drops the `<PEER_..._CERT_SHA256>` placeholder of that peer, refuses a fingerprint that another peer already has, and refuses a third fingerprint for one peer (two cover a rotation). `--replace OLD` swaps one in place, `--remove` takes one out but never a peer's last, `--new-peer` allows a peer name that is not in the file yet, and `--dry-run` prints the result without writing. The file is replaced atomically with its mode kept, or not touched at all. Or edit it by hand; the result should look like this:
 
 ```json
 {
@@ -230,10 +272,11 @@ Then run the verification checklist below.
 ## Weekly rotation
 
 1. The bridge makes a new key and CSR (`postern cert csr --new-key`).
-2. Issue a certificate from it (step 5).
-3. Add the new fingerprint next to the old one in `relay.json`, then `docker compose restart relay`.
+2. Issue a certificate from it (step 5): `deploy/scripts/issue-cert.sh --zone <ZONE_ID> --csr ~/postern-certs/peer-a.csr`.
+3. Add the new fingerprint next to the old one in `relay.json`, then `docker compose restart relay`:
+   `deploy/scripts/add-fingerprint.sh --peer peer-a --fingerprint <NEW_SHA256>`.
 4. The bridge imports the certificate and checks it (`postern cert import`, `postern edge-check`).
-5. Remove the old fingerprint, restart the relay, and revoke the old certificate.
+5. Remove the old fingerprint (`deploy/scripts/add-fingerprint.sh --peer peer-a --remove --fingerprint <OLD_SHA256>`), restart the relay, and revoke the old certificate (`deploy/scripts/revoke-cert.sh --zone <ZONE_ID> --fingerprint <OLD_SHA256>`).
 
 ## Edge secret rotation
 
@@ -242,6 +285,12 @@ Rotate the edge secret when someone who could read it (the file, or the transfor
 The relay accepts a second, *next* secret alongside the current one (`edge_secret_next_file`), so there is no window in which the edge sends a secret the relay does not know. A request passes if its secret matches either; both are compared in constant time, and the access log names the slot that matched only as `"edge_secret_slot":"current"` or `"next"`. The two relay restarts below take a few seconds each, and bridges retry with backoff. Order matters: change the transform rule only after the relay has loaded the next secret (step 2), and drop the old one only after the edge sends the new one (step 3).
 
 1. **Generate the next secret** on the relay host, next to the current one. It never appears on the terminal, in argv or in shell history:
+
+   ```sh
+   deploy/scripts/gen-edge-secret.sh --next
+   ```
+
+   It writes `deploy/secrets/edge-secret-next` (umask 077, mode 0400), refuses if that file already exists (a rotation in progress) or if there is no current secret, and prints the remaining steps. Without the script:
 
    ```sh
    (umask 077 && openssl rand -hex 32 > deploy/secrets/edge-secret-next)
@@ -293,7 +342,7 @@ Run all of it before the first real peer connects, and again after any edge chan
 ```sh
 openssl ecparam -genkey -name prime256v1 -noout -out edge-test-key.pem
 openssl req -new -key edge-test-key.pem -subj /CN=edge-test -out edge-test.csr
-# issue it as in step 5 -> edge-test.pem, and note its <CERT_ID>
+deploy/scripts/issue-cert.sh --zone <ZONE_ID> --csr edge-test.csr   # -> edge-test.pem; note its <CERT_ID> (or issue it by hand as in step 5)
 ```
 
 An edge rejection is Cloudflare's HTML block page. A relay rejection is JSON like `{"error":"forbidden"}`.
@@ -332,7 +381,7 @@ An edge rejection is Cloudflare's HTML block page. A relay rejection is JSON lik
      'https://postern.example.com/v1/poll?to=peer-a&timeout=0'
    ```
 
-6. **Revocation cuts the certificate off at the edge.** Revoke the test certificate (step 5, Revoke), wait for `revoked`, and repeat item 3. Expect 403 HTML. Then delete `edge-test-key.pem`, `edge-test.csr` and `edge-test.pem`.
+6. **Revocation cuts the certificate off at the edge.** Revoke the test certificate (step 5, Revoke: `deploy/scripts/revoke-cert.sh --zone <ZONE_ID> --id <CERT_ID>`), wait for `revoked` (`--fingerprint ... --lookup-only` shows the status), and repeat item 3. Expect 403 HTML. Then delete `edge-test-key.pem`, `edge-test.csr` and `edge-test.pem`.
 
 7. **The relay container publishes no ports.** On the relay host:
 

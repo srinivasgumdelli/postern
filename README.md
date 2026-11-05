@@ -143,7 +143,8 @@ internal/e2e         end-to-end tests through the real relay
 relay-worker/        the relay as a Cloudflare Worker + Durable Object (same API)
 testdata/conformance envelope cases both relays must agree on
 docker-compose.yml   relay + cloudflared (internal network, no published ports)
-deploy/              example relay and tunnel config
+deploy/              example relay and tunnel config, edge secret rotation overlay
+deploy/scripts       operator scripts: issue/revoke client certs, edge secret, fingerprints
 docs/                edge setup, session guard, operations, plans
 examples/            session rule, Claude Code settings, Codex config
 ```
