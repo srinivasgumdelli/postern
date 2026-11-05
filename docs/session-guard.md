@@ -35,7 +35,7 @@ All three ship in v0.
    postern guard install --project /path/to/project
    ```
 
-   This merges four hooks into `/path/to/project/.claude/settings.json` (keeping every existing key and hook; running it again adds nothing) and writes `/path/to/project/.claude/commands/postern-clear.md`. The result for a fresh project is [examples/claude-code/settings.json](../examples/claude-code/settings.json):
+   This merges four hooks into `/path/to/project/.claude/settings.json` (keeping every existing key and hook; running it again adds nothing, and running it again after the binary moved points the existing Postern entries at the new path in place) and writes `/path/to/project/.claude/commands/postern-clear.md`. The result for a fresh project is [examples/claude-code/settings.json](../examples/claude-code/settings.json):
 
    | Event | Matcher | Command |
    |---|---|---|
