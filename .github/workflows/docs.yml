@@ -1,0 +1,29 @@
+name: docs
+
+on:
+  push:
+    branches: [main]
+    paths: ["**/*.md", "tools/mermaid-check/**", ".github/workflows/docs.yml"]
+  pull_request:
+    paths: ["**/*.md", "tools/mermaid-check/**", ".github/workflows/docs.yml"]
+
+permissions:
+  contents: read
+
+jobs:
+  mermaid:
+    # GitHub renders Mermaid client-side and shows only a parse error when a
+    # diagram is invalid, so parse every diagram here first.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: "24.22.1"
+      - name: install
+        working-directory: tools/mermaid-check
+        run: npm ci
+      - name: parse diagrams
+        run: node tools/mermaid-check/check.mjs $(git ls-files '*.md' | xargs grep -l '```mermaid')

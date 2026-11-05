@@ -1,0 +1,13 @@
+{
+  "name": "postern-mermaid-check",
+  "private": true,
+  "description": "Parses every Mermaid diagram in the docs so GitHub can render them.",
+  "type": "module",
+  "scripts": {
+    "check": "node check.mjs"
+  },
+  "dependencies": {
+    "jsdom": "25.0.1",
+    "mermaid": "11.4.1"
+  }
+}

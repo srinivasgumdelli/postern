@@ -71,7 +71,7 @@ sequenceDiagram
   Note over SB: guard taints the session before check_inbox runs
   SB->>BB: check_inbox
   BB-->>SB: message inside untrusted_content<br/>origin=external, trust=untrusted
-  SB->>HB: Summary of what it asks; waits
+  SB->>HB: Summary of what it asks, then waits
   Note over SB,HB: every later tool call asks Human B<br/>until Human B types /postern-clear
 ```
 
