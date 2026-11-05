@@ -37,8 +37,8 @@ bridge  --outbound HTTPS+mTLS-->  tunnel (cloudflared)  <--outbound--  bridge
 - MCP server over stdio, configured only in the sessions that should use Postern.
 - Holds the machine's X25519 key pair and mTLS client certificate in the OS keychain (macOS Keychain first; Linux Secret Service later).
 - Each configured session launches its own `postern mcp --session NAME` process. There is no long-running daemon: every Postern process on a machine long-polls the relay and writes to one shared SQLite inbox (WAL mode, dedup by message id), so two sessions on one machine never see duplicates. Messages wait at the relay (up to 72 hours) while no session is open.
-- Refuses to start if the session name is not listed in its config, or if the config file changed since the human last pinned it. The pin is a SHA-256 of the file's path and contents, kept under a fixed keychain service (`postern-pin`) that the config cannot name, and checked before anything else in the file is used.
-- Every command that changes what the bridge trusts (`init`, `peer add/remove`, `session add/remove`, `config pin`) shows the change on the controlling terminal and asks the human to type a one-time code printed only there. A command run by an agent's shell tool cannot see the code, and with no terminal the change is refused.
+- Refuses to start if the session name is not listed in its config, or if the config file changed since the human last pinned it. The pin is an HMAC-SHA256 of the file's path and contents under a 32-byte pin key, kept with the pins under a fixed keychain service (`postern-pin`) that the config cannot name, and checked before anything else in the file is used. Postern creates the pin key in-process on the first `init` or `config pin`, so its keychain access list names only the postern binary; without the key nobody can compute a pin that verifies. Before trusting the pin key or a pin, the bridge reads the item's access list and refuses one that lets any application read it (an item planted with `security add-generic-password -A`).
+- Every command that changes what the bridge trusts (`init`, `peer add/remove`, `session add/remove`, `config pin`, and `cert import` when it promotes a rotated client key) prints the full change to the terminal and then asks the operating system for user presence: Touch ID, or the login password as fallback (LocalAuthentication, `LAPolicyDeviceOwnerAuthentication`). The system draws that dialog itself, outside the terminal, so an agent that drives the command through a pseudo-terminal (`script`, `expect`, a pty library, `tmux send-keys`) can neither read nor answer it, as it could a code printed on the terminal. It needs a logged-in GUI session on the machine; over SSH, headless, or on another platform the change is refused, with no weaker fallback.
 - The local inbox is encrypted at rest (subject, body and session names sealed with a keychain-held key), so a session that reads the database file directly sees ciphertext, not untrusted text that would bypass the guard.
 - A 401/403 from the edge or relay (revoked or rotated certificate) keeps messages queued and re-reads the certificate from the keychain; `check_inbox`, `send` and `reply` report the relay status to the agent.
 - Seals outgoing messages with NaCl box (`golang.org/x/crypto/nacl/box`) to the pinned peer public key.
@@ -124,7 +124,8 @@ Inner message (inside `box`): a 4-byte big-endian header length, a JSON header `
 | Secret | Where | Who uses it |
 |---|---|---|
 | Bridge X25519 private key | OS keychain (item created in-process, so its ACL trusts only the bridge binary) | bridge only |
-| Peer public key | bridge config, pinned with fingerprint; whole config pinned by SHA-256 in the keychain | bridge |
+| Peer public key | bridge config, pinned with fingerprint; whole config pinned by an HMAC in the keychain | bridge |
+| Config pin key | OS keychain, fixed `postern-pin` service (item created in-process) | bridge only |
 | mTLS client cert + key | OS keychain | bridge only |
 | Edge API token (one zone) | operator's keychain | operator, issuing/revoking certs |
 | Tunnel credentials | Docker secret on relay host | cloudflared only |
@@ -143,8 +144,17 @@ v1 option: hardware-bound keys via `age-plugin-se` (Secure Enclave) or `age-plug
 | Malicious or confused message (prompt injection) | untrusted note in a session | session rule + PreToolUse hook (Claude Code) / approval policy (Codex) force human approval for any tool call while unread external content is in context; tags and data framing |
 | Agent-to-agent reply loop | noise, cost | per-thread cap + circuit breaker |
 | Flood / replay | noise | rate limits at bridge and relay, dedup id, 10 min timestamp window at the relay |
-| Agent edits bridge config (swap peer key, relay URL or keychain service) | messages sealed to an attacker | config pin under a fixed keychain service, bound to the file path; re-pinning needs a one-time code typed at the terminal |
+| Agent edits bridge config (swap peer key, relay URL or keychain service) | messages sealed to an attacker | config pin under a fixed keychain service, bound to the file path and keyed by a keychain-held pin key; re-pinning needs Touch ID or the login password in a system dialog |
+| Agent writes a pin item by hand (for an edited file or a new `--config` path) | forged config trusted | the pin is an HMAC under the pin key, which only postern reads silently; items whose access list lets any application read them are refused. Residual: see below |
 | Session reads the inbox database directly | untrusted text enters context without tainting it | inbox encrypted at rest with a keychain-held key |
-| Another process running as the same OS user runs the `postern` binary | can use the bridge's identity (keychain ACL trusts the binary) | v0: documented residual risk; sessions approve shell commands while tainted. v1 option: run the bridge as a separate OS user |
+| Another process running as the same OS user runs the `postern` binary | can use the bridge's identity (keychain ACL trusts the binary) | v0: documented residual risk; sessions approve shell commands while tainted. It cannot change what the bridge trusts (peers, sessions, keys, the pin) without the human approving the system dialog. v1 option: run the bridge as a separate OS user |
 | Relay offline | messages wait | sender keeps until acked, retries with backoff |
 | Agent reads bridge keys | key theft | keys only in keychain; bridge config holds no secrets |
+
+### Residual risk: forging the pin as the same OS user
+
+The access-list check catches a pin key or pin planted with "any application" access. It cannot catch this: a process running as the same OS user deletes the `pin-key` item, re-creates it with a value it knows and an access list that names the postern binary (`security add-generic-password -s postern-pin -a pin-key -T /path/to/postern ...`), then writes a matching HMAC pin for a config of its choosing. That item looks the same as one postern created. Closing this fully needs the v1 design, where the bridge runs as a separate OS user whose keychain the agent's user cannot write.
+
+What v0 does guarantee: postern itself never pins, re-pins or changes trust without the human approving the system dialog, so an agent cannot use the postern binary to bless a config; forging a pin takes deliberate work with the keychain outside postern, which the session guard asks the human to approve while untrusted content is in context.
+
+The user-presence dialog proves a human approved, not that the human started the change: an agent can run `postern peer add ...` and the dialog still appears. The terminal shows the full change before the dialog; approve only a change you started yourself.

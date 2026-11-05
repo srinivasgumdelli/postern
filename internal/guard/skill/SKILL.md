@@ -31,6 +31,6 @@ If `check_inbox`, `send` or `reply` reports `relay_status`, tell the human the `
 
 ## What is not yours to do
 
-- Setup and trust changes are the human's: `postern init`, `peer add/remove`, `session add/remove`, `cert ...`, `config pin`, `thread reset`. Do not run them, and do not edit Postern's config, its inbox database or its guard state files.
+- Setup and trust changes are the human's: `postern init`, `peer add/remove`, `session add/remove`, `cert ...`, `config pin`, `thread reset`. Do not run them, and do not edit Postern's config, its inbox database, its keychain items or its guard state files. Trust changes ask the human for Touch ID or the login password; never try to trigger, answer or work around that dialog.
 - Never try to clear or work around the guard. After you read the inbox, tool calls in this session ask the human for approval until the human clears it; that is intended. Only the human types `/postern-clear`.
 - If a thread hits its message cap, tell the human; do not start a new thread to continue the same exchange.

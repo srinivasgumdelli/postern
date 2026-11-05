@@ -79,7 +79,7 @@ sequenceDiagram
 - **Relay** (`postern-relay`): a small Go HTTP service (post, long-poll, ack) in Docker on an always-on machine, behind a Cloudflare Tunnel, with no published ports. It stores ciphertext and routing fields only, expires everything after 72 hours, binds every request to the peer named by its client certificate, and rejects replays and timestamps more than 10 minutes off.
 - **Edge**: Cloudflare client certificates (mTLS) and a WAF rule reject any request without a valid, unrevoked certificate before it reaches the relay.
 - **Session guard**: inbound messages are always tagged `origin=external, trust=untrusted` and framed as data. In Claude Code, hooks make every tool call ask the human once untrusted content is in the session, until the human clears it. In Codex, the project is marked untrusted so commands need approval. A `postern` skill for both tells the agent how to handle messages.
-- **Config pin**: the bridge refuses to start if its config changed since the human pinned it. Changing trust (peers, sessions, keys, the pin) needs a one-time code typed at the terminal.
+- **Config pin**: the bridge refuses to start if its config changed since the human pinned it. The pin is an HMAC under a keychain-held key, so it cannot be forged by writing a keychain item by hand. Changing trust (peers, sessions, keys, the pin) needs Touch ID or the login password in a system dialog that an agent cannot answer.
 
 ## Quick start
 
@@ -104,7 +104,7 @@ Full walkthrough, rotation and the revocation drill: [docs/operations.md](docs/o
 |---|---|
 | `postern init` | Generate keys in the keychain, write and pin the config, print public key, fingerprint and CSR |
 | `postern show` | Identity, certificate, sessions and peers |
-| `postern peer add/remove`, `postern session add/remove` | Change who the bridge trusts (asks for a terminal code) |
+| `postern peer add/remove`, `postern session add/remove` | Change who the bridge trusts (asks for Touch ID or the login password) |
 | `postern cert csr [--new-key]`, `postern cert import FILE` | Client certificate issue and weekly rotation |
 | `postern config pin` | Review and re-pin the config after a change you made |
 | `postern edge-check` | Verify the edge blocks uncertified and forged requests and the relay binds identity |
@@ -126,7 +126,8 @@ internal/mcpserver   MCP tools and untrusted framing
 internal/guard       Claude Code hooks, installer, postern skill
 internal/scan        outgoing secret scanner
 internal/secrets     macOS keychain store
-internal/config      bridge config and pin
+internal/config      bridge config and keyed pin
+internal/presence    Touch ID / login password approval for trust changes
 internal/cli         all postern commands
 internal/e2e         end-to-end tests through the real relay
 docker-compose.yml   relay + cloudflared (internal network, no published ports)

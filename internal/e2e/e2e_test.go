@@ -29,6 +29,7 @@ import (
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 
 	"postern/internal/cli"
+	"postern/internal/config"
 	"postern/internal/relay"
 	"postern/internal/secrets"
 	"postern/internal/secrets/secretstest"
@@ -66,7 +67,7 @@ type node struct {
 	session string
 	cfg     string
 	logs    *syncBuffer
-	confirm func(string) error
+	confirm func(reason, summary string) error
 
 	mu     sync.Mutex
 	stores map[string]*secretstest.Memory // one per keychain service, like the real keychain
@@ -76,7 +77,7 @@ func newNode(t *testing.T, name, session string) *node {
 	dir := t.TempDir()
 	return &node{
 		name: name, session: session, cfg: filepath.Join(dir, "config.json"), logs: &syncBuffer{},
-		confirm: func(string) error { return nil }, // the operator says yes
+		confirm: func(string, string) error { return nil }, // the operator says yes
 		stores:  map[string]*secretstest.Memory{},
 	}
 }
@@ -97,7 +98,7 @@ func (n *node) env(stdout io.Writer) cli.Env {
 		Stderr:     n.logs,
 		OpenStore:  func(s string) (secrets.Store, error) { return n.store(s), nil },
 		Executable: os.Executable,
-		Confirm:    func(s string) error { return n.confirm(s) },
+		Confirm:    func(r, s string) error { return n.confirm(r, s) },
 		Version:    "test",
 	}
 }
@@ -519,14 +520,63 @@ func TestConfigCannotRedirectItsOwnPin(t *testing.T) {
 	}
 }
 
+// TestForgedPinForNewPathRefused is the forgery where an attacker writes
+// a config of their choosing at a new path and stores the unkeyed pin
+// (SHA-256 of path, NUL, contents) for it under the fixed pin service,
+// as `security add-generic-password -s postern-pin -a config-pin.<hash>`
+// would. The pin is keyed now, so the forged one does not verify.
+func TestForgedPinForNewPathRefused(t *testing.T) {
+	w := setup(t)
+	raw, err := os.ReadFile(w.a.cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	evilPath := filepath.Join(t.TempDir(), "evil.json")
+	evil := strings.Replace(string(raw), w.srv.URL, "https://attacker.example", 1)
+	if evil == string(raw) {
+		t.Fatal("fixture edit did not apply")
+	}
+	if err := os.WriteFile(evilPath, []byte(evil), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	abs, err := filepath.Abs(evilPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	abs = filepath.Clean(abs)
+	nameSum := sha256.Sum256([]byte(abs))
+	h := sha256.New()
+	h.Write([]byte(abs))
+	h.Write([]byte{0})
+	h.Write([]byte(evil))
+	forged := hex.EncodeToString(h.Sum(nil))
+	if err := w.a.store(config.PinService).Set(secrets.ConfigPin+"."+hex.EncodeToString(nameSum[:16]), []byte(forged)); err != nil {
+		t.Fatal(err)
+	}
+
+	var out bytes.Buffer
+	code := cli.Run(context.Background(), []string{"show", "--config", evilPath}, w.a.env(&out))
+	if code == 0 || strings.Contains(out.String(), "attacker.example") {
+		t.Fatalf("forged pin accepted:\n%s", out.String())
+	}
+	if !strings.Contains(w.a.logs.String(), "config changed") {
+		t.Fatalf("unexpected error: %s", w.a.logs.String())
+	}
+	// The real config still works.
+	w.a.run(t, 0, "show")
+}
+
 // TestChangesNeedTheHuman checks that every command that changes what
 // the bridge trusts stops when the human does not confirm.
 func TestChangesNeedTheHuman(t *testing.T) {
 	w := setup(t)
 	before, _ := os.ReadFile(w.a.cfg)
 	var asked int
-	w.a.confirm = func(summary string) error {
+	w.a.confirm = func(reason, summary string) error {
 		asked++
+		if reason == "" {
+			t.Error("empty reason for the system dialog")
+		}
 		if !strings.Contains(summary, "peer-a") {
 			t.Errorf("confirmation summary does not describe the config:\n%s", summary)
 		}
@@ -543,7 +593,7 @@ func TestChangesNeedTheHuman(t *testing.T) {
 	if !bytes.Equal(before, after) {
 		t.Fatal("config changed without confirmation")
 	}
-	w.a.confirm = func(string) error { return nil }
+	w.a.confirm = func(string, string) error { return nil }
 	w.a.run(t, 0, "show")
 }
 
