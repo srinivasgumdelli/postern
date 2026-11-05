@@ -401,3 +401,41 @@ func TestDefaultEnvConfirmsWithPresence(t *testing.T) {
 		t.Fatal("production environment has no confirmation")
 	}
 }
+
+// TestUsageMatchesConfigFlag checks the usage text's claim about --config
+// against each command's real flags (as -h lists them).
+func TestUsageMatchesConfigFlag(t *testing.T) {
+	if !strings.Contains(usage, "guard and hook do not read it") {
+		t.Fatalf("usage no longer says which commands take --config:\n%s", usage)
+	}
+	cases := []struct {
+		args       []string
+		wantConfig bool
+	}{
+		{[]string{"init"}, true},
+		{[]string{"show"}, true},
+		{[]string{"peer", "add"}, true},
+		{[]string{"peer", "remove"}, true},
+		{[]string{"session", "add"}, true},
+		{[]string{"session", "remove"}, true},
+		{[]string{"cert", "csr"}, true},
+		{[]string{"cert", "import"}, true},
+		{[]string{"config", "pin"}, true},
+		{[]string{"edge-check"}, true},
+		{[]string{"thread", "reset"}, true},
+		{[]string{"mcp"}, true},
+		{[]string{"guard", "install"}, false},
+		{[]string{"guard", "install-codex"}, false},
+		{[]string{"hook", "pre-tool-use"}, false},
+	}
+	for _, c := range cases {
+		var stderr bytes.Buffer
+		env := Env{Stdin: strings.NewReader(""), Stdout: &bytes.Buffer{}, Stderr: &stderr}
+		if code := Run(context.Background(), append(append([]string{}, c.args...), "-h"), env); code != 2 {
+			t.Errorf("%v -h: exit %d, want 2", c.args, code)
+		}
+		if has := strings.Contains(stderr.String(), "-config"); has != c.wantConfig {
+			t.Errorf("%v: --config accepted = %v, want %v\n%s", c.args, has, c.wantConfig, stderr.String())
+		}
+	}
+}

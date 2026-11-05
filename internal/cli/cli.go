@@ -77,7 +77,8 @@ Used by agent tools:
   postern mcp --session NAME
   postern hook pre-tool-use|post-tool-use|user-prompt-submit|session-start [--server postern]
 
-Every command accepts --config PATH (default $POSTERN_CONFIG or the user config dir).
+Commands that use the bridge config accept --config PATH (default
+$POSTERN_CONFIG or the user config dir). guard and hook do not read it.
 `
 
 // Run executes one postern command and returns the exit code.
