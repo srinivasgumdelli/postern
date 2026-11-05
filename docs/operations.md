@@ -72,6 +72,10 @@ Codex: `postern guard install-codex` installs the skill; then follow [`examples/
 
 Do not run these sessions in bypass or auto-approve modes.
 
+## Local inbox retention
+
+Each bridge prunes its local inbox hourly: sent and received messages after 30 days, failed outgoing messages after 7 days. Change the period with `"limits": {"message_retention_days": N}` in the config (then `postern config pin`). Upgrade all Postern processes on a machine together: once a newer binary migrates the inbox database, older binaries refuse to open it.
+
 ## Weekly certificate rotation
 
 Client certificates are short-lived (about 14 days) and rotate weekly.

@@ -61,16 +61,17 @@ func (l Limits) withDefaults() (Limits, error) {
 
 // threadLimitReason reports "cap" or "burst" if one more message in thread
 // would go over the limit, counting messages in both directions after the
-// thread's last reset. It must run inside the immediate transaction that
-// inserts the message.
-func threadLimitReason(ctx context.Context, tx *sql.Tx, lim Limits, thread string, resetSeq int64, now time.Time) (string, error) {
-	var total int
+// thread's last reset (pruned is how many of those retention already
+// deleted). It must run inside the immediate transaction that inserts the
+// message.
+func threadLimitReason(ctx context.Context, tx *sql.Tx, lim Limits, thread string, resetSeq, pruned int64, now time.Time) (string, error) {
+	var total int64
 	if err := tx.QueryRowContext(ctx,
 		`SELECT COUNT(*) FROM messages WHERE thread = ? AND seq > ?`, thread, resetSeq).
 		Scan(&total); err != nil {
 		return "", err
 	}
-	if total+1 > lim.ThreadMax {
+	if total+pruned+1 > int64(lim.ThreadMax) {
 		return "cap", nil
 	}
 	var burst int
