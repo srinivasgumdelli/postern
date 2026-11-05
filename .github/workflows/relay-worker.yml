@@ -1,0 +1,43 @@
+name: relay-worker
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "relay-worker/**"
+      - "testdata/conformance/**"
+      - ".github/workflows/relay-worker.yml"
+  pull_request:
+    paths:
+      - "relay-worker/**"
+      - "testdata/conformance/**"
+      - ".github/workflows/relay-worker.yml"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: relay-worker-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    # Local tests only: the Workers runtime runs in-process (miniflare).
+    # Nothing is deployed and no Cloudflare credentials are used.
+    runs-on: ubuntu-latest
+    env:
+      WRANGLER_SEND_METRICS: "false"
+    defaults:
+      run:
+        working-directory: relay-worker
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: "24.22.1"
+      - name: install
+        run: npm ci
+      - name: test
+        run: npm test
