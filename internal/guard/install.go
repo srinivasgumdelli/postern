@@ -55,8 +55,11 @@ func InstallClaudeCode(projectDir, binaryPath, serverName string) error {
 	settingsPath := filepath.Join(claudeDir, "settings.json")
 	commandPath := filepath.Join(claudeDir, "commands", "postern-clear.md")
 
-	writeCommand, err := commandFileNeeded(commandPath)
+	writeCommand, err := fileNeeded(commandPath, ClearCommandFile)
 	if err != nil {
+		return err
+	}
+	if _, err := fileNeeded(filepath.Join(claudeDir, "skills", "postern", "SKILL.md"), SkillFile); err != nil {
 		return err
 	}
 	if err := checkHooksNotDisabled(filepath.Join(claudeDir, "settings.local.json")); err != nil {
@@ -88,7 +91,12 @@ func InstallClaudeCode(projectDir, binaryPath, serverName string) error {
 			return fmt.Errorf("guard: writing %s: %w", commandPath, err)
 		}
 	}
-	return nil
+	absClaude, err := filepath.Abs(claudeDir)
+	if err != nil {
+		return fmt.Errorf("guard: %w", err)
+	}
+	_, err = InstallSkill(filepath.Join(absClaude, "skills"))
+	return err
 }
 
 // HookCommand returns the shell command line the installer registers for
@@ -103,7 +111,10 @@ func shellQuote(s string) string {
 	return "'" + strings.ReplaceAll(s, "'", `'\''`) + "'"
 }
 
-func commandFileNeeded(path string) (bool, error) {
+// fileNeeded reports whether path must be written with want: true if it
+// is missing, false if it already holds want, and an error if it holds
+// something else (never overwritten).
+func fileNeeded(path, want string) (bool, error) {
 	cur, err := os.ReadFile(path)
 	if errors.Is(err, fs.ErrNotExist) {
 		return true, nil
@@ -111,7 +122,7 @@ func commandFileNeeded(path string) (bool, error) {
 	if err != nil {
 		return false, fmt.Errorf("guard: reading %s: %w", path, err)
 	}
-	if string(cur) == ClearCommandFile {
+	if string(cur) == want {
 		return false, nil
 	}
 	return false, fmt.Errorf("guard: %s exists with different content; not overwriting it (remove it and run the install again)", path)
