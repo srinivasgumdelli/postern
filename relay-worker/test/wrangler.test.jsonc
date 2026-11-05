@@ -1,0 +1,19 @@
+// Test-only configuration for vitest and `wrangler types`. Never deployed:
+// it has no routes, and the fingerprints are fixed test values, not real
+// certificates. The deployable template is ../wrangler.toml.example.
+{
+  "name": "postern-relay-test",
+  "main": "../src/index.ts",
+  "compatibility_date": "2026-08-01",
+  "workers_dev": false,
+  "durable_objects": {
+    "bindings": [{ "name": "RELAY", "class_name": "Relay" }]
+  },
+  "migrations": [{ "tag": "v1", "new_sqlite_classes": ["Relay"] }],
+  "vars": {
+    "RELAY_HOSTNAME": "postern.example.com",
+    "PEERS": "{\"peer-a\":[\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\"],\"peer-b\":[\"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\",\"b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2\"]}",
+    "POSTS_PER_HOUR": "120",
+    "MAX_QUEUED_PER_PEER": "1000"
+  }
+}

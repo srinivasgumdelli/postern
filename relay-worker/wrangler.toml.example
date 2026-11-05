@@ -1,0 +1,48 @@
+# Postern relay as a Cloudflare Worker plus one SQLite-backed Durable Object.
+#
+# Copy to wrangler.toml (gitignored), replace every <PLACEHOLDER>, then follow
+# docs/relay-modes.md ("Worker deploy") before running `npx wrangler deploy`.
+# Nothing in this file is secret: certificate fingerprints are public.
+
+name = "postern-relay"
+main = "src/index.ts"
+compatibility_date = "2026-08-01"
+account_id = "<ACCOUNT_ID>"
+
+# Serve only the custom domain. No *.workers.dev URL and no preview URLs:
+# those hostnames have no mTLS, and the Worker refuses them anyway.
+workers_dev = false
+preview_urls = false
+
+routes = [
+  { pattern = "postern.example.com", custom_domain = true },
+]
+
+[[durable_objects.bindings]]
+name = "RELAY"
+class_name = "Relay"
+
+# The Free plan supports only SQLite-backed Durable Objects.
+[[migrations]]
+tag = "v1"
+new_sqlite_classes = ["Relay"]
+
+[vars]
+# Must equal the custom domain above. Requests for any other host get 404.
+RELAY_HOSTNAME = "postern.example.com"
+# Peer name -> SHA-256 fingerprints of that peer's client certificates, as
+# printed by `postern cert import`. List two during a rotation. The Worker
+# refuses every request (500) while a placeholder or bad value is present.
+PEERS = '{"peer-a":["<PEER_A_CERT_SHA256>"],"peer-b":["<PEER_B_CERT_SHA256>"]}'
+POSTS_PER_HOUR = "120"
+MAX_QUEUED_PER_PEER = "1000"
+
+# Logs. The Worker writes only fixed-format lines (event, method, route,
+# status, duration, peer name). Cloudflare's automatic invocation logs record
+# request metadata, which can include the URL with its query string, so they
+# are turned off.
+[observability]
+enabled = true
+
+[observability.logs]
+invocation_logs = false
