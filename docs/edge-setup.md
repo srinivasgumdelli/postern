@@ -1,6 +1,6 @@
 # Edge and relay setup
 
-How the operator puts the relay on the internet: a Cloudflare Tunnel to a relay that publishes no ports, with client certificates (mTLS) enforced at the edge for one dedicated hostname. Bridge-side steps (CSR, `cert import`, `edge-check`) are in [operations.md](operations.md).
+How the operator puts the relay on the internet: a Cloudflare Tunnel to a relay that publishes no ports, with client certificates (mTLS) enforced at the edge for one dedicated hostname. Bridge-side steps (CSR, `cert import`, `edge-check`) are in [operations.md](operations.md). To run the relay as a Cloudflare Worker instead (no tunnel, no relay host), see [relay-modes.md](relay-modes.md); it reuses steps 3 to 5 and 7 below.
 
 Placeholders used throughout. Replace them at deploy time; never commit real values.
 

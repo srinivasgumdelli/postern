@@ -38,6 +38,8 @@ flowchart LR
   E --> T
 ```
 
+The relay shown here runs in Docker behind a Cloudflare Tunnel. It can instead run as a Cloudflare Worker with a Durable Object, which needs no always-on host; both serve the same API, so bridges only change `relay_url`. See [docs/relay-modes.md](docs/relay-modes.md).
+
 ### A message, end to end
 
 ```mermaid
@@ -130,6 +132,8 @@ internal/config      bridge config and keyed pin
 internal/presence    Touch ID / login password approval for trust changes
 internal/cli         all postern commands
 internal/e2e         end-to-end tests through the real relay
+relay-worker/        the relay as a Cloudflare Worker + Durable Object (same API)
+testdata/conformance envelope cases both relays must agree on
 docker-compose.yml   relay + cloudflared (internal network, no published ports)
 deploy/              example relay and tunnel config
 docs/                edge setup, session guard, operations, plans
@@ -145,6 +149,8 @@ make race           # with the race detector
 make vet            # go vet + gofmt check
 make keychain-test  # touches the real macOS login keychain (throwaway items)
 make relay-image    # docker compose build relay
+
+cd relay-worker && npm ci && npm test   # Worker relay, local Workers runtime (Node 24)
 ```
 
 Requires Go 1.26. The bridge needs macOS (keychain via cgo); the relay builds for Linux without cgo.

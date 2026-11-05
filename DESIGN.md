@@ -48,11 +48,14 @@ bridge  --outbound HTTPS+mTLS-->  tunnel (cloudflared)  <--outbound--  bridge
 - Tags every inbound message `origin=external`, `trust=untrusted`, and includes that in tool output.
 - Must run natively (not in a container) so it can reach the keychain or a hardware key.
 
-### relay (tiny Go HTTP service, Docker)
+### relay (two deployment modes, one API)
 
-- Stores envelopes in SQLite. Only routing fields are readable; content is ciphertext.
+The relay runs either as a tiny Go HTTP service in Docker behind a tunnel (shown above) or as a Cloudflare Worker with one SQLite-backed Durable Object (`relay-worker/`). Both serve the same API with the same status codes, error bodies, limits and envelope rules (shared conformance cases in `testdata/conformance/`), so bridges change only `relay_url`. Trade-offs and deploy steps: [docs/relay-modes.md](docs/relay-modes.md).
+
+- Stores envelopes in SQLite (on the relay host, or in Durable Object storage). Only routing fields are readable; content is ciphertext.
 - Deletes anything older than 72 hours. No backups. Logs never include envelope bodies.
-- No published ports. Reachable only through `cloudflared` on the Compose network.
+- Docker mode: no published ports. Reachable only through `cloudflared` on the Compose network.
+- Worker mode: served only on the custom domain (no `workers.dev` or preview URLs); identity is read from the edge's mTLS result, never from a header.
 
 ### edge
 
@@ -99,7 +102,7 @@ All requests arrive through the tunnel after the edge has checked the client cer
 | POST | `/v1/ack/{id}` | `to` | marks delivered; relay may delete on ack |
 | GET | `/healthz` | | no auth beyond the edge |
 
-Identity binding (v0). The relay maps the client certificate's SHA-256 fingerprint to a peer name and rejects any `from` (post) or `to` (poll, ack) that doesn't match: 403. In production a Cloudflare transform rule *sets* `X-Postern-Client-Cert-Sha256` from `cf.tls_client_auth.cert_fingerprint_sha256` (overwriting any client-supplied value); this is safe only because the relay is reachable solely through the tunnel. The same rule also sets `X-Postern-Edge-Secret` to a static random value (at least 32 bytes, `openssl rand -hex 32`) that the relay reads at startup from `edge_secret_file` (a Docker secret). In header mode the relay checks that header first, comparing SHA-256 digests in constant time: missing, wrong or repeated is 401 `no_identity`, logged as a fixed event without the value. Only then does it map the fingerprint. This stops a process on the relay host or a container on the internal network, which can reach the relay without the tunnel, from claiming an identity. mtls mode ignores the secret. In dev and tests the relay terminates mTLS itself and computes the fingerprint. No identity: 401.
+Identity binding (v0). The relay maps the client certificate's SHA-256 fingerprint to a peer name and rejects any `from` (post) or `to` (poll, ack) that doesn't match: 403. In production a Cloudflare transform rule *sets* `X-Postern-Client-Cert-Sha256` from `cf.tls_client_auth.cert_fingerprint_sha256` (overwriting any client-supplied value); this is safe only because the relay is reachable solely through the tunnel. The same rule also sets `X-Postern-Edge-Secret` to a static random value (at least 32 bytes, `openssl rand -hex 32`) that the relay reads at startup from `edge_secret_file` (a Docker secret). In header mode the relay checks that header first, comparing SHA-256 digests in constant time: missing, wrong or repeated is 401 `no_identity`, logged as a fixed event without the value. Only then does it map the fingerprint. This stops a process on the relay host or a container on the internal network, which can reach the relay without the tunnel, from claiming an identity. mtls mode ignores the secret. In Worker mode there is no header: the Worker reads `request.cf.tlsClientAuth` and requires a presented, verified, unrevoked certificate before mapping its fingerprint through `PEERS`, so no edge secret is needed. In dev and tests the relay terminates mTLS itself and computes the fingerprint. No identity: 401.
 
 Replay window (v0). The relay rejects envelopes whose `ts` is more than 10 minutes from its clock (422) and remembers ids for 72 hours (409). Senders reseal queued messages with a fresh `ts` on each retry, keeping the same id.
 
@@ -142,6 +145,7 @@ v1 option: hardware-bound keys via `age-plugin-se` (Secure Enclave) or `age-plug
 |---|---|---|
 | Relay host or edge account compromised | ciphertext only; can drop/delay | rotate token + tunnel creds + edge secret, redeploy |
 | Process on the relay host or internal network impersonates a peer (reaches the relay without the tunnel and sends a fingerprint header) | could poll a peer's ciphertext, or ack and so delete its messages | edge secret: the edge sets a static secret header, and the relay rejects any `/v1` request without it (401) before identity mapping. Residual: anyone who can read the secret file or the transform rule can still impersonate (ciphertext only; can drop or ack messages). Rotate the secret if either may have been read |
+| Cloudflare account compromised in Worker mode (it stores the ciphertext at rest) | can read stored ciphertext and routing fields, drop, delay or withhold messages, change the Worker or `PEERS`; cannot read or forge messages (no keys; routing fields sealed; bridges check the pinned sender key) | rotate account credentials and the edge token, redeploy from the repo, rotate client certificates |
 | Client cert leaks | can reach relay; can't read or forge | revoke cert, reissue |
 | Machine stolen with cert + key | read/send as that peer until revoked | revoke cert, rotate key pairs; hardware keys prevent extraction |
 | Malicious or confused message (prompt injection) | untrusted note in a session | session rule + PreToolUse hook (Claude Code) / approval policy (Codex) force human approval for any tool call while unread external content is in context; tags and data framing |
