@@ -322,3 +322,41 @@ func TestRunRejectsBadConfig(t *testing.T) {
 		t.Fatalf("bad flag: exit %d", got)
 	}
 }
+
+// TestRunRejectsBadEdgeSecret: header mode does not start without a usable
+// edge secret, and the startup error never prints the file's content.
+func TestRunRejectsBadEdgeSecret(t *testing.T) {
+	dir := t.TempDir()
+	peers := `"peers":{"peer-a":["` + strings.Repeat("a", 64) + `"],"peer-b":["` + strings.Repeat("b", 64) + `"]}`
+	const short = "0123456789abcdef0123456789abcde" // one byte short
+	const placeholder = "<EDGE_SECRET_FROM_OPENSSL_RAND_HEX_32>"
+	for name, content := range map[string]string{"short": short + "\n", "placeholder": placeholder + "\n", "none": ""} {
+		t.Run(name, func(t *testing.T) {
+			secretPath := filepath.Join(dir, name+"-secret")
+			field := `"edge_secret_file":"` + secretPath + `",`
+			if name == "none" {
+				field = ""
+			} else if err := os.WriteFile(secretPath, []byte(content), 0o400); err != nil {
+				t.Fatal(err)
+			}
+			cfg := filepath.Join(dir, name+"-relay.json")
+			body := `{"identity":"header","db":"` + filepath.Join(dir, name+".db") + `",` + field + peers + `}`
+			if err := os.WriteFile(cfg, []byte(body), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			var stderr bytes.Buffer
+			if got := run([]string{"-config", cfg}, &stderr); got != 1 {
+				t.Fatalf("exit %d, want 1", got)
+			}
+			out := stderr.String()
+			if !strings.Contains(out, "edge") {
+				t.Fatalf("error does not mention the edge secret: %s", out)
+			}
+			for _, v := range []string{short, placeholder, "EDGE_SECRET_FROM"} {
+				if strings.Contains(out, v) {
+					t.Fatalf("stderr contains the secret file's content: %s", out)
+				}
+			}
+		})
+	}
+}

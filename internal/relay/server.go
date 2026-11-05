@@ -3,6 +3,8 @@ package relay
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
+	"crypto/subtle"
 	"crypto/tls"
 	"crypto/x509"
 	"encoding/json"
@@ -199,8 +201,18 @@ type reqInfo struct{ peer string }
 
 // authenticate maps the request's client-certificate fingerprint to a
 // configured peer. It writes 401 when the request carries no identity
-// and 403 when the fingerprint belongs to no peer.
+// (in header mode, also when the edge secret is missing or wrong) and
+// 403 when the fingerprint belongs to no peer.
 func (s *Server) authenticate(w http.ResponseWriter, r *http.Request) (string, bool) {
+	if s.cfg.Identity == IdentityHeader {
+		// Before any identity mapping: without the edge secret the
+		// fingerprint header is just a claim by whoever reached us.
+		if reason, ok := s.edgeSecretOK(r); !ok {
+			s.log.Warn("edge secret rejected", "reason", reason)
+			writeError(w, http.StatusUnauthorized, "no_identity")
+			return "", false
+		}
+	}
 	fp, present := s.fingerprint(r)
 	if !present {
 		writeError(w, http.StatusUnauthorized, "no_identity")
@@ -215,6 +227,31 @@ func (s *Server) authenticate(w http.ResponseWriter, r *http.Request) (string, b
 		info.peer = peer
 	}
 	return peer, true
+}
+
+// edgeSecretOK checks the edge secret header in header identity mode. It
+// compares SHA-256 digests with crypto/subtle, so neither the value nor
+// its length leaks through timing. reason is a fixed word for the log;
+// the header value is never logged. The header is removed from r so no
+// later code can log or echo it.
+func (s *Server) edgeSecretOK(r *http.Request) (reason string, ok bool) {
+	vals := r.Header.Values(EdgeSecretHeader)
+	r.Header.Del(EdgeSecretHeader)
+	if s.cfg.edgeSecret == nil {
+		return "not_configured", false // unreachable: New requires it
+	}
+	switch len(vals) {
+	case 0:
+		return "missing", false
+	case 1:
+	default:
+		return "multiple", false
+	}
+	got := sha256.Sum256([]byte(vals[0]))
+	if subtle.ConstantTimeCompare(got[:], s.cfg.edgeSecret.digest[:]) != 1 {
+		return "mismatch", false
+	}
+	return "", true
 }
 
 // fingerprint returns the normalized SHA-256 fingerprint of the client
@@ -235,8 +272,12 @@ func (s *Server) fingerprint(r *http.Request) (fp string, present bool) {
 	// fingerprint, overwriting anything the client sent. Trusting it is
 	// safe ONLY because the relay publishes no ports and is reachable
 	// solely through the tunnel (cloudflared on an internal Compose
-	// network). Never expose the relay any other way in this mode.
+	// network), and because authenticate has already checked the edge
+	// secret, which the same edge sets. Never expose the relay any other
+	// way in this mode. The header is removed once read, so nothing
+	// downstream can log it.
 	vals := r.Header.Values(s.cfg.FingerprintHeader)
+	r.Header.Del(s.cfg.FingerprintHeader)
 	switch len(vals) {
 	case 0:
 		return "", false

@@ -440,6 +440,7 @@ func TestHeaderModeIdentity(t *testing.T) {
 	}
 	send := func(method, path, body string, values ...string) response {
 		req, _ := http.NewRequest(method, f.hs.URL+path, strings.NewReader(body))
+		req.Header.Set(EdgeSecretHeader, f.edgeSecret)
 		for _, v := range values {
 			req.Header.Add(DefaultFingerprintHeader, v)
 		}
@@ -563,15 +564,21 @@ func TestNewRejectsBadInput(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer st.Close()
-	if _, err := New(baseConfig(), nil, nil); err == nil {
+	secret := newEdgeSecret(t)
+	if _, err := New(baseConfig(t, secret), nil, nil); err == nil {
 		t.Fatal("New accepted a nil store")
 	}
-	bad := baseConfig()
+	bad := baseConfig(t, secret)
 	bad.Identity = "none"
 	if _, err := New(bad, st, nil); err == nil {
 		t.Fatal("New accepted an invalid identity mode")
 	}
-	s, err := New(baseConfig(), st, nil)
+	noSecret := baseConfig(t, secret)
+	noSecret.EdgeSecretFile = ""
+	if _, err := New(noSecret, st, nil); err == nil {
+		t.Fatal("New accepted header mode without an edge secret")
+	}
+	s, err := New(baseConfig(t, secret), st, nil)
 	if err != nil {
 		t.Fatal(err)
 	}

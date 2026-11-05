@@ -3,6 +3,7 @@ package relay
 import (
 	"bytes"
 	"context"
+	"crypto/rand"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
@@ -11,6 +12,7 @@ import (
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"path/filepath"
 	"strings"
 	"sync"
@@ -52,6 +54,9 @@ type fixture struct {
 	logs   *syncBuffer
 	fp     map[string]string
 	keys   map[string]keyPair
+	// edgeSecret is what the edge's transform rule would set on every
+	// request it forwards.
+	edgeSecret string
 
 	clockMu sync.Mutex
 	now     time.Time
@@ -62,9 +67,34 @@ func testFingerprint(name string) string {
 	return hex.EncodeToString(sum[:])
 }
 
-func baseConfig() Config {
+// newEdgeSecret returns a fresh random edge secret, as
+// `openssl rand -hex 32` would.
+func newEdgeSecret(t *testing.T) string {
+	t.Helper()
+	b := make([]byte, 32)
+	if _, err := rand.Read(b); err != nil {
+		t.Fatal(err)
+	}
+	return hex.EncodeToString(b)
+}
+
+// writeEdgeSecret writes content to a fresh file and returns its path.
+func writeEdgeSecret(t *testing.T, content string) string {
+	t.Helper()
+	p := filepath.Join(t.TempDir(), "edge-secret")
+	if err := os.WriteFile(p, []byte(content), 0o400); err != nil {
+		t.Fatal(err)
+	}
+	return p
+}
+
+// baseConfig is a header-mode config whose edge secret file holds secret
+// (with a trailing newline, as `openssl rand -hex 32 > file` writes it).
+func baseConfig(t *testing.T, secret string) Config {
+	t.Helper()
 	return Config{
-		Identity: IdentityHeader,
+		Identity:       IdentityHeader,
+		EdgeSecretFile: writeEdgeSecret(t, secret+"\n"),
 		Peers: map[string][]string{
 			"peer-a": {testFingerprint("peer-a")},
 			"peer-b": {testFingerprint("peer-b")},
@@ -74,7 +104,8 @@ func baseConfig() Config {
 
 func newFixture(t *testing.T, mutate func(*Config)) *fixture {
 	t.Helper()
-	cfg := baseConfig()
+	secret := newEdgeSecret(t)
+	cfg := baseConfig(t, secret)
 	if mutate != nil {
 		mutate(&cfg)
 	}
@@ -90,7 +121,7 @@ func newFixture(t *testing.T, mutate func(*Config)) *fixture {
 		t.Fatal(err)
 	}
 	f := &fixture{
-		t: t, srv: srv, st: st, dbPath: dbPath, logs: logs,
+		t: t, srv: srv, st: st, dbPath: dbPath, logs: logs, edgeSecret: secret,
 		fp:   map[string]string{"peer-a": testFingerprint("peer-a"), "peer-b": testFingerprint("peer-b")},
 		keys: map[string]keyPair{},
 		now:  time.Now().Truncate(time.Second),
@@ -160,7 +191,8 @@ func (r response) errorCode() string {
 	return e.Error
 }
 
-// do sends a request as peer ("" sends no identity header).
+// do sends a request as the edge would forward it from peer: always with
+// the edge secret, and with peer's fingerprint ("" sends no fingerprint).
 func (f *fixture) do(method, path, peer string, body []byte) response {
 	f.t.Helper()
 	var rd io.Reader
@@ -171,6 +203,7 @@ func (f *fixture) do(method, path, peer string, body []byte) response {
 	if err != nil {
 		f.t.Fatal(err)
 	}
+	req.Header.Set(EdgeSecretHeader, f.edgeSecret)
 	if peer != "" {
 		req.Header.Set(DefaultFingerprintHeader, f.fp[peer])
 	}
