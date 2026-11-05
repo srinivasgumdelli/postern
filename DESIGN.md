@@ -46,6 +46,7 @@ bridge  --outbound HTTPS+mTLS-->  tunnel (cloudflared)  <--outbound--  bridge
 - Enforces limits: 32 KB body, rate limit per session and overall, per-thread message cap with a circuit breaker.
 - Secret scanner (v0): blocks, never redacts, an outgoing `send`/`reply` whose subject or body looks like a private key, token or credential assignment. `reply` is the one path that leaves the machine, and encryption does not help if a session pastes a secret into it. The error names the rule and line, never the match.
 - Tags every inbound message `origin=external`, `trust=untrusted`, and includes that in tool output.
+- Keeps a local audit log (v1, `internal/audit`): one JSONL line per send, queue, delivery, rejection, scanner block, limit, breaker trip, receipt, drop and relay state change, and per CLI trust change. Metadata only (peer, local session, thread, id, size, status, reason code); never subjects, bodies, keys, certificates, query strings, paths or the sending session of an inbound message. Each line carries `seq` and `prev` (SHA-256 of the line before), so `postern audit verify` finds an edited, removed or reordered line. Shared by all processes on the machine under a file lock; rotates at 10 MiB, keeps 10 files. On by default (`audit.enabled`).
 - Must run natively (not in a container) so it can reach the keychain or a hardware key.
 
 ### relay (two deployment modes, one API)
@@ -157,6 +158,7 @@ v1 option: hardware-bound keys via `age-plugin-se` (Secure Enclave) or `age-plug
 | Another process running as the same OS user runs the `postern` binary | can use the bridge's identity (keychain ACL trusts the binary) | v0: documented residual risk; sessions approve shell commands while tainted. It cannot change what the bridge trusts (peers, sessions, keys, the pin) without the human approving the system dialog. v1 option: run the bridge as a separate OS user |
 | Relay offline | messages wait | sender keeps until acked, retries with backoff |
 | Agent reads bridge keys | key theft | keys only in keychain; bridge config holds no secrets |
+| Something hides what went through the bridge, or what trust changed (edits, removes or reorders audit entries) | the operator cannot reconstruct what happened | local hash-chained audit log, metadata only; `postern audit verify` names the first broken entry by seq and file. Evidence, not prevention: a process running as the same OS user can rewrite the whole file and its chain, and a cut-off end still chains, so keep the last hash elsewhere (`audit verify --hash`). v1 option: the separate-OS-user bridge owns the log |
 
 ### Residual risk: forging the pin as the same OS user
 

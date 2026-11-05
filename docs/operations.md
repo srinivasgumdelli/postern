@@ -76,6 +76,45 @@ Do not run these sessions in bypass or auto-approve modes.
 
 Each bridge prunes its local inbox hourly: sent and received messages after 30 days, failed outgoing messages after 7 days. Change the period with `"limits": {"message_retention_days": N}` in the config (then `postern config pin`). Upgrade all Postern processes on a machine together: once a newer binary migrates the inbox database, older binaries refuse to open it.
 
+## Audit log
+
+Each machine keeps a local, append-only audit log of what went through its bridge and of every trust change made with the CLI. It is metadata only, and it is on by default.
+
+**Where it lives.** `<data dir>/audit/audit.jsonl`, where the data directory is `data_dir` from the config or, by default, the config file's directory (`~/Library/Application Support/postern/audit/`). The directory is mode 0700 and the files 0600; Postern refuses to use them if group or others can access them, or if the file is a symlink. Every `postern mcp` process and the CLI on the machine append to the same file, one at a time, under a lock on `audit.lock` in that directory.
+
+**What it records.** One JSON line per event, with `ts` (UTC), `seq`, `event`, `actor` (`bridge` or `cli`) and, where they apply, `peer`, `session`, `thread`, `id`, `size_bytes` (body size), `status` (relay HTTP status), `reason` (a short code), and `prev`.
+
+- Bridge: `sent`, `queued`, `delivered` (a queued message accepted on a retry), `rejected` (the relay refused it, or it `expired` after 72 hours), `blocked_by_scanner` (`reason` is the rule name and line, for example `rule=private-key,line=3`), `rate_limited` (`session` or `global`), `thread_tripped` (`cap` or `burst`), `received`, `dropped` (the drop reason code, for example `wrong_recipient` or `decrypt`), `relay_auth_failed`, `relay_unreachable`, `relay_recovered` (each once per change of state, not per retry).
+- CLI, after the change succeeded: `init`, `peer_add`, `peer_remove`, `session_add`, `session_remove`, `config_pin`, `cert_import`, `cert_rotate`, `thread_reset`, `guard_install`.
+
+It never records subjects, bodies, keys, certificates, fingerprints, query strings or file paths, and never the sending session of an inbound message (that name comes from the other machine, inside the sealed message). Every field is checked against a strict pattern before it is written; anything else is written as `!invalid`.
+
+**Reading it.**
+
+```sh
+postern audit tail            # last 20 events
+postern audit tail -n 200 --json
+```
+
+`tail` re-checks every field it prints, so a hand-edited line cannot put arbitrary text (or terminal escapes) on your screen or into an agent's context. Neither `tail` nor `verify` opens the bridge's keys; both refuse a config that no longer matches its pin, so an edited `data_dir` cannot point them at another log.
+
+**Verifying it.**
+
+```sh
+postern audit verify
+postern audit verify --hash <LAST_HASH_NOTED_EARLIER>
+```
+
+Every line's `prev` is the SHA-256 of the line before it (the first line ever has 64 zeros), and `seq` goes up by one. `verify` walks the rotated files and the active file in order and exits non-zero at the first entry that does not parse, skips a `seq`, or whose `prev` does not match, naming that `seq` and the file. An edit to an entry shows up at the entry after it. On success it prints the last hash: write it down somewhere the machine's user cannot change (a note on another device, a ticket), and later run `verify --hash` with it to check that every entry up to that point is still there and unchanged.
+
+**Rotation.** At 10 MiB the active file is renamed to `audit-YYYYMMDD-HHMMSS.jsonl` (UTC) and a new one starts whose first line chains to the old file's last line. At most 10 rotated files are kept; once the oldest are removed, `verify` says the chain starts at a later `seq` and takes that first entry as given.
+
+**What it does not prove.** It is tamper evidence, not prevention. Anything running as your OS user (including an agent with shell access) can rewrite the whole log and recompute every hash, or delete it. Cutting entries off the end, or editing only the last entry, leaves a chain that still verifies; only a hash you kept elsewhere catches that. A crash or a full disk mid-write can leave one broken line, which `verify` reports like an edit. A clean `verify` shows the entries are consistent with each other; it does not show that nothing happened that is not in the log. Running the bridge as a separate OS user (v1) is what would put the log out of an agent's reach.
+
+**Turning it off.** Set `"audit": {"enabled": false}` in the config and run `postern config pin`. That pin is still recorded (`config_pin` with `reason=audit_off`), so the log shows when it stopped. If the audit log cannot be opened (for example wrong permissions), `postern mcp` refuses to start and says why; if a single write fails later, the bridge logs it and keeps working.
+
+Upgrade note: a config saved by this version states `"audit"`, which older binaries reject as an unknown field. Upgrade every Postern binary on a machine together.
+
 ## Weekly certificate rotation
 
 Client certificates are short-lived (about 14 days) and rotate weekly.
@@ -107,6 +146,7 @@ Record the date and outcome. Repeat after any change to the edge rules.
 | Bridge refuses to start: config pin mismatch | Something changed the config. Inspect it (relay URL, keychain service, peer keys, sessions). If you made the change, `postern config pin` (it asks for Touch ID or your password); if not, treat it as tampering. |
 | Bridge refuses a keychain item as "not created by postern" | A pin key or pin in the `postern-pin` service lets any application read it, so something other than postern made it. Treat it as tampering: delete that item (Keychain Access, or `security delete-generic-password -s postern-pin -a <account>`), review the config, then `postern config pin`. |
 | A Touch ID or password dialog for `postern` appears that you did not expect | Something tried to change what the bridge trusts. Cancel it, then find out what ran it. |
+| `postern audit verify` reports a break | Something edited, removed or reordered audit entries (or a write was interrupted by a crash or full disk). Note the `seq` and file it names; entries before it still verify. Copy the audit directory somewhere safe, then find out what ran as your user around that time. Do not edit the log to make it verify again. |
 | Thread circuit breaker tripped | Read the thread first. If the loop is understood, `postern thread reset <thread>`. |
 | Relay host or edge account compromised | Content stays sealed. Rotate the edge API token, tunnel credentials and edge secret ([edge-setup.md](edge-setup.md#edge-secret-rotation)), redeploy the relay, rotate client certificates. |
 | Relay logs show `edge secret rejected` | Something reached the relay without going through the edge (or the transform rule's secret is out of date). The `reason` says whether the header was missing, wrong or repeated. Find what on the relay host or internal network sent it; if the rule was just changed, re-check it against `deploy/secrets/edge-secret`. |

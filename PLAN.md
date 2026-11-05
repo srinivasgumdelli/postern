@@ -26,11 +26,11 @@ Acceptance for v0:
 
 ## v1 (+1-2 days)
 
-- Audit log (JSONL, metadata only, no bodies).
-- Bridge under a separate OS user (closes the same-user residual risk).
-- Hardware-bound keys option.
-- `postern wait` helper.
-- Setup scripts and docs.
+- [x] Audit log (JSONL, metadata only, no bodies). Done: `internal/audit`, one hash-chained file per machine shared by every Postern process under a file lock, rotated at 10 MiB (10 kept); bridge events and CLI trust changes; `postern audit tail` and `postern audit verify`. Tamper evidence only (a same-user process can rewrite it). Tests: concurrency across processes, rotation and the cross-file chain, edited/removed/reordered lines, no content in any field, bridge and CLI events, permissions. See [docs/operations.md](docs/operations.md#audit-log).
+- [ ] Bridge under a separate OS user (closes the same-user residual risk).
+- [ ] Hardware-bound keys option.
+- [ ] `postern wait` helper.
+- [ ] Setup scripts and docs.
 
 ## Before the first real peer connects
 
