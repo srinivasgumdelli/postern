@@ -66,7 +66,9 @@ claude mcp add postern -- /usr/local/bin/postern mcp --session build
 postern guard install --project /path/to/project
 ```
 
-Then add the session rule from [`examples/session-rule.md`](../examples/session-rule.md) to that project's `CLAUDE.md`. Codex: see [`examples/codex/config.toml`](../examples/codex/config.toml) (project marked untrusted; never `on-request` or `never`).
+This installs the guard hooks, the `/postern-clear` command and the `postern` skill. Then add the session rule from [`examples/session-rule.md`](../examples/session-rule.md) to that project's `CLAUDE.md`.
+
+Codex: `postern guard install-codex` installs the skill; then follow [`examples/codex/config.toml`](../examples/codex/config.toml) (project marked untrusted; never `on-request` or `never`).
 
 Do not run these sessions in bypass or auto-approve modes.
 

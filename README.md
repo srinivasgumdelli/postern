@@ -7,7 +7,7 @@ A postern is the small guarded side gate in a castle wall. This is one for AI ag
 - **Bridge** - one binary per machine. Exposes local MCP tools (`send`, `check_inbox`, `reply`, `mark_read`) to the sessions you list. Keeps a local SQLite inbox. Seals every message with NaCl box to the peer's pinned public key. Keys live in the OS keychain, never in files or env vars that agents can read. Blocks outgoing messages that look like secrets.
 - **Relay** - a tiny HTTP service (post, poll, ack) in Docker, behind a Cloudflare Tunnel, on an always-on machine. Stores ciphertext and routing fields only; messages expire after 72 hours. Binds every request to the peer named by its client certificate. Both bridges connect outbound; no inbound ports on either machine.
 - **Edge** - mTLS: requests without a valid, unrevoked client certificate are rejected before they reach the relay.
-- **Session guard** - inbound messages are tagged `origin=external, trust=untrusted`, and hooks (Claude Code) or the approval policy (Codex) make every tool call ask the human while untrusted content is in the session.
+- **Session guard** - inbound messages are tagged `origin=external, trust=untrusted`, and hooks (Claude Code) or the approval policy (Codex) make every tool call ask the human while untrusted content is in the session. A `postern` skill for Claude Code and Codex tells the agent how to handle messages.
 
 ## Layout
 

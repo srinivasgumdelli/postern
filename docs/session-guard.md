@@ -106,6 +106,17 @@ The guard never exits with code 1, which Claude Code would treat as a non-blocki
 
 Markers live in the user's config directory, under `postern/taint` (on macOS `~/Library/Application Support/postern/taint`). The directory is mode 0700, each file 0600, written atomically. A file is named by the SHA-256 of the Claude Code session id and contains only `{"state": ..., "since": <unix time>}`. The states are `pending` and `tainted` (both gate the session), `cleared` (the human cleared the guard, or every `check_inbox` came back empty) and `clean` (transcript scanned, nothing found). A `pending` marker also counts outstanding `check_inbox` calls; a `clean` one records how many transcript bytes were scanned and a short hash of the transcript path, never the path itself. No message content, subject, sender or session id is stored, logged or echoed by the guard. Markers are kept until cleared, so a session resumed weeks later is still guarded.
 
+## The postern skill
+
+Both Claude Code and Codex get a `postern` skill ([`internal/guard/skill/SKILL.md`](../internal/guard/skill/SKILL.md)) that the agent loads when it uses the Postern tools. It spells out the working rules: read `check_inbox`, summarise, stop and wait; show the human the exact text before `send`/`reply`; never paste secrets or unapproved files; never rephrase or encode a blocked message to get past the scanner; report `relay_status`; leave setup commands, the config and the guard to the human.
+
+The skill is guidance for a cooperative agent, not enforcement: the hooks (Claude Code) and the approval policy (Codex) are what hold if the agent is misled.
+
+- Claude Code: `postern guard install --project DIR` writes it to `DIR/.claude/skills/postern/SKILL.md`.
+- Codex: `postern guard install-codex` writes it to `$CODEX_HOME/skills/postern/SKILL.md` (default `~/.codex/skills`).
+
+Neither installer overwrites an edited copy; remove it and install again to update.
+
 ## Codex
 
 Codex hooks cannot force an approval prompt (a `PreToolUse` hook can deny but not ask), so for Codex the approval policy is the enforcement layer. The complete configuration is [examples/codex/config.toml](../examples/codex/config.toml). It goes in the user-level `~/.codex/config.toml`.
