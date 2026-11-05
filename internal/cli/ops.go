@@ -60,9 +60,39 @@ func cmdGuardInstall(env Env, args []string) error {
 	if err := guard.InstallClaudeCode(dir, exe, *server); err != nil {
 		return err
 	}
-	fmt.Fprintf(env.Stdout, "Installed Postern hooks in %s and the /postern-clear command.\n",
+	fmt.Fprintf(env.Stdout, "Installed Postern hooks in %s, the /postern-clear command and the postern skill.\n",
 		filepath.Join(dir, ".claude", "settings.json"))
 	fmt.Fprintln(env.Stdout, "Also add the session rule (examples/session-rule.md) to the project's CLAUDE.md, and never run this session in bypass mode.")
+	return nil
+}
+
+// cmdGuardInstallCodex installs the postern skill for Codex. Codex has
+// no hooks that can force a prompt; its guard is the approval policy in
+// examples/codex/config.toml.
+func cmdGuardInstallCodex(env Env, args []string) error {
+	fs := flag.NewFlagSet("postern guard install-codex", flag.ContinueOnError)
+	fs.SetOutput(env.Stderr)
+	dir := fs.String("skills-dir", "", "Codex skills directory (default $CODEX_HOME/skills or ~/.codex/skills)")
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
+	d := *dir
+	if d == "" {
+		var err error
+		if d, err = guard.DefaultCodexSkillsDir(); err != nil {
+			return err
+		}
+	}
+	d, err := filepath.Abs(d)
+	if err != nil {
+		return err
+	}
+	path, err := guard.InstallSkill(d)
+	if err != nil {
+		return err
+	}
+	fmt.Fprintf(env.Stdout, "Installed the postern skill at %s.\n", path)
+	fmt.Fprintln(env.Stdout, "Also mark the project untrusted and set Postern's tool approvals as in examples/codex/config.toml.")
 	return nil
 }
 

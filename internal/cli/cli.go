@@ -63,6 +63,7 @@ Setup (run these yourself, not through an agent):
   postern cert import FILE
   postern config pin
   postern guard install --project DIR [--server postern]
+  postern guard install-codex [--skills-dir DIR]
   postern edge-check
   postern thread reset THREAD
 
@@ -94,7 +95,7 @@ func Run(ctx context.Context, args []string, env Env) int {
 	case "config":
 		err = sub(env, rest, map[string]func(Env, []string) error{"pin": cmdConfigPin})
 	case "guard":
-		err = sub(env, rest, map[string]func(Env, []string) error{"install": cmdGuardInstall})
+		err = sub(env, rest, map[string]func(Env, []string) error{"install": cmdGuardInstall, "install-codex": cmdGuardInstallCodex})
 	case "thread":
 		err = sub(env, rest, map[string]func(Env, []string) error{"reset": func(e Env, a []string) error { return cmdThreadReset(ctx, e, a) }})
 	case "mcp":
