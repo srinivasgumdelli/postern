@@ -14,6 +14,13 @@ data/
 deploy/relay.json
 deploy/secrets/
 deploy/cloudflared/config.yml
+relay-worker/wrangler.toml
+relay-worker/wrangler.json
+relay-worker/wrangler.jsonc
+relay-worker/.dev.vars*
 
 # build output
 /bin/
+relay-worker/node_modules/
+relay-worker/.wrangler/
+relay-worker/worker-configuration.d.ts

@@ -1,0 +1,16 @@
+{
+  "name": "postern-relay-worker",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "types": "WRANGLER_SEND_METRICS=false wrangler types -c test/wrangler.test.jsonc --strict-vars=false worker-configuration.d.ts",
+    "typecheck": "npm run types && tsc --noEmit",
+    "test": "npm run typecheck && vitest run"
+  },
+  "devDependencies": {
+    "@cloudflare/vitest-pool-workers": "0.23.0",
+    "typescript": "5.9.3",
+    "vitest": "4.1.12",
+    "wrangler": "4.151.3"
+  }
+}
