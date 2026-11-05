@@ -15,7 +15,7 @@ race:
 
 vet:
 	$(GO) vet ./...
-	@test -z "$$(gofmt -l .)" || (gofmt -l . && echo "gofmt needed" && exit 1)
+	@out="$$(git ls-files '*.go' | xargs gofmt -l)"; test -z "$$out" || (echo "gofmt needed: $$out" && exit 1)
 
 # Touches the real login keychain with a throwaway service name.
 keychain-test:

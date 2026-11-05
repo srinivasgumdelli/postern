@@ -1,0 +1,49 @@
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  bridge-macos:
+    # The bridge uses the macOS keychain through cgo, so the full suite
+    # runs on macOS. Tests that touch the real keychain stay gated off.
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: go.mod
+      - name: vet
+        run: go vet ./...
+      - name: gofmt
+        run: |
+          out="$(git ls-files '*.go' | xargs gofmt -l)"
+          test -z "$out" || (echo "gofmt needed: $out" && exit 1)
+      - name: test
+        run: go test -race ./...
+
+  relay-linux:
+    # The relay ships as a static Linux binary in Docker.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: go.mod
+      - name: build static relay
+        run: CGO_ENABLED=0 go build -trimpath -o /dev/null ./cmd/postern-relay
+      - name: test relay
+        run: go test -race ./internal/relay/... ./internal/envelope/... ./cmd/postern-relay/...

@@ -155,6 +155,10 @@ cd relay-worker && npm ci && npm test   # Worker relay, local Workers runtime (N
 
 Requires Go 1.26. The bridge needs macOS (keychain via cgo); the relay builds for Linux without cgo.
 
+## Contributing and security
+
+See [CONTRIBUTING.md](CONTRIBUTING.md). Report vulnerabilities privately as described in [SECURITY.md](SECURITY.md).
+
 ## Status
 
 v0 is implemented and tested. Every security property in [PLAN.md](PLAN.md) has a test, including an end-to-end run of two bridges through the real relay over mTLS and an injection and exfiltration fixture against the guard.
