@@ -54,7 +54,7 @@ postern peer add --name peer-b --public-key '<BASE64_PUBLIC_KEY>' --fingerprint 
    ```
 
    This checks that the certificate matches the key in the keychain, stores it, and prints its SHA-256 fingerprint.
-4. The operator adds that fingerprint under `peer-a` in the relay's `relay.json` and restarts the relay.
+4. The operator adds that fingerprint under `peer-a` in the relay's `relay.json` and restarts the relay (in Worker mode: adds it to `PEERS` in `wrangler.toml` and redeploys, see [relay-modes.md](relay-modes.md#worker-deploy)).
 5. Verify: `postern edge-check`.
 
 ## 5. Connect sessions
@@ -93,7 +93,7 @@ Do this once, on the same day, with both operators present.
 1. The operator revokes peer-b's current certificate at the edge.
 2. On machine B, `postern edge-check` must fail: requests with that certificate are blocked at the edge.
 3. A peer-b session's `send` reports the message as queued with `relay_status: relay_auth_failed`, and its `check_inbox` reports the same; peer-a receives nothing new.
-4. The operator removes the revoked fingerprint from `relay.json` as well.
+4. The operator removes the revoked fingerprint from `relay.json` as well and restarts the relay (in Worker mode: from `PEERS`, then redeploys).
 5. Re-issue: peer-b runs `postern cert csr --new-key`, the operator issues and registers the new certificate, `postern cert import`, `postern edge-check` passes, and queued messages deliver.
 
 Record the date and outcome. Repeat after any change to the edge rules.
@@ -102,7 +102,7 @@ Record the date and outcome. Repeat after any change to the edge rules.
 
 | Event | Action |
 |---|---|
-| Client certificate leaked | Revoke it at the edge, remove its fingerprint from `relay.json`, rotate (`cert csr --new-key`). |
+| Client certificate leaked | Revoke it at the edge, remove its fingerprint from `relay.json` (or `PEERS` in Worker mode) and restart or redeploy the relay, rotate (`cert csr --new-key`). |
 | Machine lost or stolen | Revoke its certificate, remove its fingerprint, and have every peer remove its public key (`postern peer remove`, re-pin). Re-run `init --force` on the replacement machine and exchange fingerprints again. |
 | Bridge refuses to start: config pin mismatch | Something changed the config. Inspect it (relay URL, keychain service, peer keys, sessions). If you made the change, `postern config pin` (it asks for Touch ID or your password); if not, treat it as tampering. |
 | Bridge refuses a keychain item as "not created by postern" | A pin key or pin in the `postern-pin` service lets any application read it, so something other than postern made it. Treat it as tampering: delete that item (Keychain Access, or `security delete-generic-password -s postern-pin -a <account>`), review the config, then `postern config pin`. |
