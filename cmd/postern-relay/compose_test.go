@@ -3,6 +3,7 @@ package main
 import (
 	"bufio"
 	"bytes"
+	"encoding/json"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -229,6 +230,80 @@ func TestComposeContainersHardened(t *testing.T) {
 	// The tunnel credentials arrive as a secret, not a bind-mounted file.
 	if s := root.path("secrets", "tunnel_credentials", "file"); s == nil {
 		t.Error("tunnel credentials must be a compose secret")
+	}
+}
+
+// serviceSecrets returns source -> target for a service's secrets (long
+// or short syntax; the target defaults to the source).
+func serviceSecrets(root *node, svc string) map[string]string {
+	out := map[string]string{}
+	s := root.path("services", svc, "secrets")
+	if s == nil {
+		return out
+	}
+	for _, item := range s.children {
+		if item.key != "-" {
+			continue
+		}
+		src := item.child("source")
+		if src == nil {
+			out[unquote(item.value)] = unquote(item.value)
+			continue
+		}
+		target := unquote(src.value)
+		if tg := item.child("target"); tg != nil {
+			target = unquote(tg.value)
+		}
+		out[unquote(src.value)] = target
+	}
+	return out
+}
+
+// TestComposeRelayGetsEdgeSecret: the relay, and only the relay, receives
+// the edge secret as a compose secret from the gitignored deploy/secrets/
+// directory, at the path the example relay.json reads.
+func TestComposeRelayGetsEdgeSecret(t *testing.T) {
+	root := loadCompose(t)
+	f := root.path("secrets", "edge_secret", "file")
+	if f == nil || unquote(f.value) != "./deploy/secrets/edge-secret" {
+		t.Fatal("secrets.edge_secret.file must be ./deploy/secrets/edge-secret")
+	}
+	relaySecrets := serviceSecrets(root, "relay")
+	target, ok := relaySecrets["edge_secret"]
+	if !ok {
+		t.Fatal("relay does not receive the edge_secret secret")
+	}
+	if _, ok := relaySecrets["tunnel_credentials"]; ok {
+		t.Error("relay must not receive the tunnel credentials")
+	}
+	if _, ok := serviceSecrets(root, "cloudflared")["edge_secret"]; ok {
+		t.Error("cloudflared must not receive the edge secret")
+	}
+	if _, ok := serviceSecrets(root, "cloudflared")["tunnel_credentials"]; !ok {
+		t.Error("cloudflared lost the tunnel credentials secret")
+	}
+
+	example, err := os.ReadFile(filepath.Join("..", "..", "deploy", "relay.example.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var cfg struct {
+		EdgeSecretFile string `json:"edge_secret_file"`
+	}
+	if err := json.Unmarshal(example, &cfg); err != nil {
+		t.Fatal(err)
+	}
+	if want := "/run/secrets/" + target; cfg.EdgeSecretFile != want {
+		t.Fatalf("relay.example.json edge_secret_file = %q, want %q", cfg.EdgeSecretFile, want)
+	}
+
+	// The secret file's directory must stay gitignored.
+	gi, err := os.ReadFile(filepath.Join("..", "..", ".gitignore"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !slices.Contains(strings.Split(string(gi), "\n"), "deploy/secrets/") {
+		t.Fatal(".gitignore must ignore deploy/secrets/")
 	}
 }
 

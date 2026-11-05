@@ -4,7 +4,9 @@
 # network. The only way in is the tunnel: cloudflared dials out to the
 # edge, and the edge rejects any request without a valid, unrevoked client
 # certificate before it reaches the tunnel. The relay trusts the
-# fingerprint header the edge sets only because of this layout; never add
+# fingerprint header the edge sets only because of this layout, and only
+# on requests that also carry the edge secret the edge sets (so other
+# processes on this host or network cannot claim an identity). Never add
 # `ports:` or `expose:` here, and never attach the relay to another
 # network. cmd/postern-relay/compose_test.go enforces this.
 #
@@ -12,6 +14,7 @@
 #   deploy/relay.json                    <- deploy/relay.example.json
 #   deploy/cloudflared/config.yml        <- deploy/cloudflared/config.example.yml
 #   deploy/secrets/tunnel-credentials.json  (from `cloudflared tunnel create`)
+#   deploy/secrets/edge-secret              (from `openssl rand -hex 32`)
 # See docs/edge-setup.md.
 
 name: postern
@@ -40,6 +43,10 @@ services:
         read_only: true
         bind:
           create_host_path: false
+    # Mounted at /run/secrets/edge_secret, the path relay.json names.
+    secrets:
+      - source: edge_secret
+        target: edge_secret
     networks:
       - relay-internal
     healthcheck:
@@ -88,3 +95,7 @@ volumes:
 secrets:
   tunnel_credentials:
     file: ./deploy/secrets/tunnel-credentials.json
+  # The value the edge's transform rule sends as X-Postern-Edge-Secret.
+  # Relay only; cloudflared never needs it.
+  edge_secret:
+    file: ./deploy/secrets/edge-secret
