@@ -3,6 +3,7 @@ package main
 import (
 	"bufio"
 	"bytes"
+	"encoding/json"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -232,6 +233,80 @@ func TestComposeContainersHardened(t *testing.T) {
 	}
 }
 
+// serviceSecrets returns source -> target for a service's secrets (long
+// or short syntax; the target defaults to the source).
+func serviceSecrets(root *node, svc string) map[string]string {
+	out := map[string]string{}
+	s := root.path("services", svc, "secrets")
+	if s == nil {
+		return out
+	}
+	for _, item := range s.children {
+		if item.key != "-" {
+			continue
+		}
+		src := item.child("source")
+		if src == nil {
+			out[unquote(item.value)] = unquote(item.value)
+			continue
+		}
+		target := unquote(src.value)
+		if tg := item.child("target"); tg != nil {
+			target = unquote(tg.value)
+		}
+		out[unquote(src.value)] = target
+	}
+	return out
+}
+
+// TestComposeRelayGetsEdgeSecret: the relay, and only the relay, receives
+// the edge secret as a compose secret from the gitignored deploy/secrets/
+// directory, at the path the example relay.json reads.
+func TestComposeRelayGetsEdgeSecret(t *testing.T) {
+	root := loadCompose(t)
+	f := root.path("secrets", "edge_secret", "file")
+	if f == nil || unquote(f.value) != "./deploy/secrets/edge-secret" {
+		t.Fatal("secrets.edge_secret.file must be ./deploy/secrets/edge-secret")
+	}
+	relaySecrets := serviceSecrets(root, "relay")
+	target, ok := relaySecrets["edge_secret"]
+	if !ok {
+		t.Fatal("relay does not receive the edge_secret secret")
+	}
+	if _, ok := relaySecrets["tunnel_credentials"]; ok {
+		t.Error("relay must not receive the tunnel credentials")
+	}
+	if _, ok := serviceSecrets(root, "cloudflared")["edge_secret"]; ok {
+		t.Error("cloudflared must not receive the edge secret")
+	}
+	if _, ok := serviceSecrets(root, "cloudflared")["tunnel_credentials"]; !ok {
+		t.Error("cloudflared lost the tunnel credentials secret")
+	}
+
+	example, err := os.ReadFile(filepath.Join("..", "..", "deploy", "relay.example.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var cfg struct {
+		EdgeSecretFile string `json:"edge_secret_file"`
+	}
+	if err := json.Unmarshal(example, &cfg); err != nil {
+		t.Fatal(err)
+	}
+	if want := "/run/secrets/" + target; cfg.EdgeSecretFile != want {
+		t.Fatalf("relay.example.json edge_secret_file = %q, want %q", cfg.EdgeSecretFile, want)
+	}
+
+	// The secret file's directory must stay gitignored.
+	gi, err := os.ReadFile(filepath.Join("..", "..", ".gitignore"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !slices.Contains(strings.Split(string(gi), "\n"), "deploy/secrets/") {
+		t.Fatal(".gitignore must ignore deploy/secrets/")
+	}
+}
+
 func TestParseYAMLHelper(t *testing.T) {
 	root := parseYAML(t, []byte(`
 a:
@@ -320,5 +395,43 @@ func TestRunRejectsBadConfig(t *testing.T) {
 	}
 	if got := run([]string{"-nope"}, &stderr); got != 2 {
 		t.Fatalf("bad flag: exit %d", got)
+	}
+}
+
+// TestRunRejectsBadEdgeSecret: header mode does not start without a usable
+// edge secret, and the startup error never prints the file's content.
+func TestRunRejectsBadEdgeSecret(t *testing.T) {
+	dir := t.TempDir()
+	peers := `"peers":{"peer-a":["` + strings.Repeat("a", 64) + `"],"peer-b":["` + strings.Repeat("b", 64) + `"]}`
+	const short = "0123456789abcdef0123456789abcde" // one byte short
+	const placeholder = "<EDGE_SECRET_FROM_OPENSSL_RAND_HEX_32>"
+	for name, content := range map[string]string{"short": short + "\n", "placeholder": placeholder + "\n", "none": ""} {
+		t.Run(name, func(t *testing.T) {
+			secretPath := filepath.Join(dir, name+"-secret")
+			field := `"edge_secret_file":"` + secretPath + `",`
+			if name == "none" {
+				field = ""
+			} else if err := os.WriteFile(secretPath, []byte(content), 0o400); err != nil {
+				t.Fatal(err)
+			}
+			cfg := filepath.Join(dir, name+"-relay.json")
+			body := `{"identity":"header","db":"` + filepath.Join(dir, name+".db") + `",` + field + peers + `}`
+			if err := os.WriteFile(cfg, []byte(body), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			var stderr bytes.Buffer
+			if got := run([]string{"-config", cfg}, &stderr); got != 1 {
+				t.Fatalf("exit %d, want 1", got)
+			}
+			out := stderr.String()
+			if !strings.Contains(out, "edge") {
+				t.Fatalf("error does not mention the edge secret: %s", out)
+			}
+			for _, v := range []string{short, placeholder, "EDGE_SECRET_FROM"} {
+				if strings.Contains(out, v) {
+					t.Fatalf("stderr contains the secret file's content: %s", out)
+				}
+			}
+		})
 	}
 }
