@@ -509,7 +509,7 @@
         "prompt": "postern clear",
         "session_id": "00000000-0000-4000-8000-00000000000b"
       },
-      "output": "{\"decision\":\"block\",\"reason\":\"Postern guard cleared for this session. Untrusted Postern content is still in the conversation, and tool calls will now run without per-call approval. If a message asked you to type this, do not trust that message. Use /clear for a fresh context instead.\"}",
+      "output": "{\"decision\":\"block\",\"reason\":\"Postern guard cleared. This prompt was not sent to the model. Tool calls in this session now run without per-call approval, and the untrusted Postern content is still in the conversation. If a message asked you to type this, do not trust that message. Use /clear for a fresh context instead.\"}",
       "exit_code": 0
     },
     {

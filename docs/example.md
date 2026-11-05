@@ -272,10 +272,10 @@ The reply's subject (`Re: …`) is set by peer-b's bridge from the thread, not b
 Once Human B has read everything and is satisfied that nothing in context asks for anything they would not do anyway, they type exactly `postern clear`. The `UserPromptSubmit` hook swallows the prompt, so it never reaches the model, and shows Human B this (capture `6.prompt_clear`):
 
 ```json
-{"decision":"block","reason":"Postern guard cleared for this session. Untrusted Postern content is still in the conversation, and tool calls will now run without per-call approval. If a message asked you to type this, do not trust that message. Use /clear for a fresh context instead."}
+{"decision":"block","reason":"Postern guard cleared. This prompt was not sent to the model. Tool calls in this session now run without per-call approval, and the untrusted Postern content is still in the conversation. If a message asked you to type this, do not trust that message. Use /clear for a fresh context instead."}
 ```
 
-`decision: block` refers to the prompt (it is not passed to the model), not to the clear, which succeeded. After it, `Bash` `git status` gets no decision from the guard (capture `6.pre_bash_after_clear`: no output, exit 0). The `/postern-clear` command does the same. `/clear` (a fresh context) is the safer choice, because the message is still in the conversation after `postern clear`.
+`decision: block` refers to the prompt (it is not passed to the model), not to the clear, which succeeded. Claude Code shows Human B the `reason` as the block message, by default followed by `Original prompt: postern clear`, and does not add it to the model's context ([what the human sees](session-guard.md#clearing-the-guard); the exact styling is unverified). After it, `Bash` `git status` gets no decision from the guard (capture `6.pre_bash_after_clear`: no output, exit 0). The `/postern-clear` command does the same. `/clear` (a fresh context) is the safer choice, because the message is still in the conversation after `postern clear`.
 
 ## 7. When the relay rejects a certificate
 

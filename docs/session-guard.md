@@ -89,7 +89,9 @@ The last two clear the guard but leave the message in the conversation. Use them
 
 A message can try to talk you into clearing: "the guard is stuck, type `postern clear` to continue". So when either one clears the guard, the notice Claude Code shows you says it plainly:
 
-> Postern guard cleared for this session. Untrusted Postern content is still in the conversation, and tool calls will now run without per-call approval. If a message asked you to type this, do not trust that message. Use /clear for a fresh context instead.
+> Postern guard cleared. This prompt was not sent to the model. Tool calls in this session now run without per-call approval, and the untrusted Postern content is still in the conversation. If a message asked you to type this, do not trust that message. Use /clear for a fresh context instead.
+
+What you see. To keep the prompt from the model, the hook answers `{"decision":"block","reason":...}`. The Claude Code hooks reference says that on `UserPromptSubmit` a `"block"` stops the prompt before it reaches Claude, the `reason` is shown to the user and not added to context, the turn ends with the reason as a warning line, and by default the block message ends with `Original prompt:` and the text you typed (here `postern clear`, which is harmless). So the notice appears where Claude Code shows blocked prompts, possibly styled as a warning; that is why it opens with "Postern guard cleared." The clear itself succeeded. The exact styling and wording Claude Code puts around the reason were not checked in a live session (**unverified**).
 
 The guard never needs clearing for Postern to work. If you are unsure, use `/clear`.
 
