@@ -29,6 +29,7 @@ import (
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 
 	"postern/internal/cli"
+	"postern/internal/config"
 	"postern/internal/relay"
 	"postern/internal/secrets"
 	"postern/internal/secrets/secretstest"
@@ -517,6 +518,52 @@ func TestConfigCannotRedirectItsOwnPin(t *testing.T) {
 	if !strings.Contains(w.a.logs.String(), "config changed") {
 		t.Fatalf("unexpected error: %s", w.a.logs.String())
 	}
+}
+
+// TestForgedPinForNewPathRefused is the forgery where an attacker writes
+// a config of their choosing at a new path and stores the unkeyed pin
+// (SHA-256 of path, NUL, contents) for it under the fixed pin service,
+// as `security add-generic-password -s postern-pin -a config-pin.<hash>`
+// would. The pin is keyed now, so the forged one does not verify.
+func TestForgedPinForNewPathRefused(t *testing.T) {
+	w := setup(t)
+	raw, err := os.ReadFile(w.a.cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	evilPath := filepath.Join(t.TempDir(), "evil.json")
+	evil := strings.Replace(string(raw), w.srv.URL, "https://attacker.example", 1)
+	if evil == string(raw) {
+		t.Fatal("fixture edit did not apply")
+	}
+	if err := os.WriteFile(evilPath, []byte(evil), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	abs, err := filepath.Abs(evilPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	abs = filepath.Clean(abs)
+	nameSum := sha256.Sum256([]byte(abs))
+	h := sha256.New()
+	h.Write([]byte(abs))
+	h.Write([]byte{0})
+	h.Write([]byte(evil))
+	forged := hex.EncodeToString(h.Sum(nil))
+	if err := w.a.store(config.PinService).Set(secrets.ConfigPin+"."+hex.EncodeToString(nameSum[:16]), []byte(forged)); err != nil {
+		t.Fatal(err)
+	}
+
+	var out bytes.Buffer
+	code := cli.Run(context.Background(), []string{"show", "--config", evilPath}, w.a.env(&out))
+	if code == 0 || strings.Contains(out.String(), "attacker.example") {
+		t.Fatalf("forged pin accepted:\n%s", out.String())
+	}
+	if !strings.Contains(w.a.logs.String(), "config changed") {
+		t.Fatalf("unexpected error: %s", w.a.logs.String())
+	}
+	// The real config still works.
+	w.a.run(t, 0, "show")
 }
 
 // TestChangesNeedTheHuman checks that every command that changes what
