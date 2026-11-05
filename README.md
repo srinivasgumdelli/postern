@@ -170,3 +170,7 @@ Not done yet:
 - v1 items in [PLAN.md](PLAN.md): audit log, hardware-bound keys, bridge under a separate OS user, `postern wait`.
 
 Design and threat model: [DESIGN.md](DESIGN.md). Known residual risks: [docs/operations.md](docs/operations.md#residual-risks-v0) and [docs/session-guard.md](docs/session-guard.md#residual-risks).
+
+## License
+
+Apache License 2.0. See [LICENSE](LICENSE) and [NOTICE](NOTICE).

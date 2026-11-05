@@ -24,3 +24,6 @@ relay-worker/.dev.vars*
 relay-worker/node_modules/
 relay-worker/.wrangler/
 relay-worker/worker-configuration.d.ts
+
+# agent worktrees
+/.claude/worktrees/
