@@ -54,7 +54,7 @@ postern peer add --name peer-b --public-key '<BASE64_PUBLIC_KEY>' --fingerprint 
    ```
 
    This checks that the certificate matches the key in the keychain, stores it, and prints its SHA-256 fingerprint.
-4. The operator adds that fingerprint under `peer-a` in the relay's `relay.json` and restarts the relay.
+4. The operator adds that fingerprint under `peer-a` in the relay's `relay.json` and restarts the relay (in Worker mode: adds it to `PEERS` in `wrangler.toml` and redeploys, see [relay-modes.md](relay-modes.md#worker-deploy)).
 5. Verify: `postern edge-check`.
 
 ## 5. Connect sessions
@@ -68,7 +68,7 @@ postern guard install --project /path/to/project
 
 This installs the guard hooks, the `/postern-clear` command and the `postern` skill. Then add the session rule from [`examples/session-rule.md`](../examples/session-rule.md) to that project's `CLAUDE.md`.
 
-Codex: `postern guard install-codex` installs the skill; then follow [`examples/codex/config.toml`](../examples/codex/config.toml) (project marked untrusted; never `on-request` or `never`).
+Codex: `postern guard install-codex` installs the skill; then follow [`examples/codex/config.toml`](../examples/codex/config.toml) in the user-level `~/.codex/config.toml` (project marked untrusted, `read-only` sandbox; never `on-request` or `never`), install [`examples/codex/rules/postern.rules`](../examples/codex/rules/postern.rules) as `~/.codex/rules/postern.rules`, and add the session rule to the project's `AGENTS.md`. Details: [session-guard.md](session-guard.md#codex).
 
 Do not run these sessions in bypass or auto-approve modes.
 
@@ -81,9 +81,9 @@ Each bridge prunes its local inbox hourly: sent and received messages after 30 d
 Client certificates are short-lived (about 14 days) and rotate weekly.
 
 1. `postern cert csr --new-key` generates a new key, keeps it as the *next* key in the keychain (the current certificate keeps working), and prints a CSR.
-2. The operator issues a certificate for it.
-3. `postern cert import new.pem` sees that the certificate matches the next key, asks you to approve the switch (Touch ID or password), promotes it, and prints the new fingerprint.
-4. The operator adds the new fingerprint next to the old one in `relay.json` (both are accepted during the overlap) and restarts the relay.
+2. The operator issues a certificate for it and notes its SHA-256 fingerprint ([edge-setup.md](edge-setup.md) step 5).
+3. The operator adds the new fingerprint next to the old one in `relay.json` (both are accepted during the overlap) and restarts the relay. In Worker mode: add it to `PEERS` and redeploy ([relay-modes.md](relay-modes.md#rotation)). Do this before the import, so the bridge is never presenting a certificate the relay does not know.
+4. `postern cert import new.pem` sees that the certificate matches the next key, asks you to approve the switch (Touch ID or password), promotes it, and prints the new fingerprint. Check that it matches the one the operator added.
 5. Once `postern edge-check` passes with the new certificate, the operator removes the old fingerprint and revokes the old certificate at the edge.
 
 ## Revocation drill (before the first real peer connects)
@@ -93,7 +93,7 @@ Do this once, on the same day, with both operators present.
 1. The operator revokes peer-b's current certificate at the edge.
 2. On machine B, `postern edge-check` must fail: requests with that certificate are blocked at the edge.
 3. A peer-b session's `send` reports the message as queued with `relay_status: relay_auth_failed`, and its `check_inbox` reports the same; peer-a receives nothing new.
-4. The operator removes the revoked fingerprint from `relay.json` as well.
+4. The operator takes the revoked fingerprint out of `relay.json` as well and restarts the relay (in Worker mode: out of `PEERS`, then redeploys). Every peer must keep at least one fingerprint: the Docker relay refuses to start, and the Worker answers 500 to everyone, when a peer has none. If the replacement certificate is not issued yet, put a fingerprint that matches no certificate in its place (`openssl rand -hex 32`).
 5. Re-issue: peer-b runs `postern cert csr --new-key`, the operator issues and registers the new certificate, `postern cert import`, `postern edge-check` passes, and queued messages deliver.
 
 Record the date and outcome. Repeat after any change to the edge rules.
@@ -102,7 +102,7 @@ Record the date and outcome. Repeat after any change to the edge rules.
 
 | Event | Action |
 |---|---|
-| Client certificate leaked | Revoke it at the edge, remove its fingerprint from `relay.json`, rotate (`cert csr --new-key`). |
+| Client certificate leaked | Revoke it at the edge, take its fingerprint out of `relay.json` (or `PEERS` in Worker mode; replace it with `openssl rand -hex 32` if it was the peer's only one) and restart or redeploy the relay, rotate (`cert csr --new-key`). |
 | Machine lost or stolen | Revoke its certificate, remove its fingerprint, and have every peer remove its public key (`postern peer remove`, re-pin). Re-run `init --force` on the replacement machine and exchange fingerprints again. |
 | Bridge refuses to start: config pin mismatch | Something changed the config. Inspect it (relay URL, keychain service, peer keys, sessions). If you made the change, `postern config pin` (it asks for Touch ID or your password); if not, treat it as tampering. |
 | Bridge refuses a keychain item as "not created by postern" | A pin key or pin in the `postern-pin` service lets any application read it, so something other than postern made it. Treat it as tampering: delete that item (Keychain Access, or `security delete-generic-password -s postern-pin -a <account>`), review the config, then `postern config pin`. |
