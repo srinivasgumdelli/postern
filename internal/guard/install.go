@@ -2,6 +2,8 @@ package guard
 
 import (
 	"bytes"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -10,6 +12,7 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"slices"
 	"strings"
 	"unicode"
 )
@@ -60,7 +63,7 @@ func InstallClaudeCode(projectDir, binaryPath, serverName string) error {
 	if err != nil {
 		return err
 	}
-	if _, err := fileNeeded(filepath.Join(claudeDir, "skills", "postern", "SKILL.md"), SkillFile); err != nil {
+	if _, err := fileNeeded(filepath.Join(claudeDir, "skills", "postern", "SKILL.md"), SkillFile, previousSkills...); err != nil {
 		return err
 	}
 	if err := checkHooksNotDisabled(filepath.Join(claudeDir, "settings.local.json")); err != nil {
@@ -115,7 +118,7 @@ func shellQuote(s string) string {
 // fileNeeded reports whether path must be written with want: true if it
 // is missing, false if it already holds want, and an error if it holds
 // something else (never overwritten).
-func fileNeeded(path, want string) (bool, error) {
+func fileNeeded(path, want string, previous ...string) (bool, error) {
 	cur, err := os.ReadFile(path)
 	if errors.Is(err, fs.ErrNotExist) {
 		return true, nil
@@ -125,6 +128,12 @@ func fileNeeded(path, want string) (bool, error) {
 	}
 	if string(cur) == want {
 		return false, nil
+	}
+	// A copy that is byte-for-byte an older shipped version is ours to
+	// upgrade; anything else is a local edit and is left alone.
+	sum := sha256.Sum256(cur)
+	if slices.Contains(previous, hex.EncodeToString(sum[:])) {
+		return true, nil
 	}
 	return false, fmt.Errorf("guard: %s exists with different content; not overwriting it (remove it and run the install again)", path)
 }
