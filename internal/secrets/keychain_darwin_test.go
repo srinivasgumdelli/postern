@@ -4,11 +4,15 @@ package secrets
 
 import (
 	"bytes"
+	"context"
 	"crypto/rand"
 	"encoding/hex"
 	"errors"
+	"fmt"
 	"os"
+	"os/exec"
 	"testing"
+	"time"
 )
 
 // TestKeychainRoundTrip uses the real login keychain, so it runs only
@@ -86,6 +90,72 @@ func TestKeychainRoundTrip(t *testing.T) {
 	if _, err := st.Get(BoxPrivateKey); !errors.Is(err, ErrNotFound) {
 		t.Fatalf("Get after delete: got %v, want ErrNotFound", err)
 	}
+}
+
+// TestKeychainACLCheck plants items the way an attacker would, with the
+// security tool, and checks that CheckOwnedACL tells them apart from
+// items the store created in-process. It uses the real login keychain,
+// so it runs only with POSTERN_TEST_KEYCHAIN=1, under a fresh random
+// service name, and removes every item it creates.
+func TestKeychainACLCheck(t *testing.T) {
+	if os.Getenv("POSTERN_TEST_KEYCHAIN") != "1" {
+		t.Skip("set POSTERN_TEST_KEYCHAIN=1 to run against the real keychain")
+	}
+	var rnd [8]byte
+	if _, err := rand.Read(rnd[:]); err != nil {
+		t.Fatal(err)
+	}
+	service := "postern-test-" + hex.EncodeToString(rnd[:])
+	st, err := NewKeychain(service)
+	if err != nil {
+		t.Fatal(err)
+	}
+	checker, ok := st.(ACLChecker)
+	if !ok {
+		t.Fatal("keychain store does not implement ACLChecker")
+	}
+	security := func(args ...string) error {
+		ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+		defer cancel()
+		out, err := exec.CommandContext(ctx, "/usr/bin/security", args...).CombinedOutput()
+		if err != nil {
+			return fmt.Errorf("security %s: %v: %s", args[0], err, out)
+		}
+		return nil
+	}
+	t.Cleanup(func() {
+		if err := st.Delete("owned"); err != nil && !errors.Is(err, ErrNotFound) {
+			t.Errorf("cleanup owned: %v", err)
+		}
+		for _, a := range []string{"planted-any", "planted-named"} {
+			_ = security("delete-generic-password", "-s", service, "-a", a)
+		}
+	})
+
+	if err := checker.CheckOwnedACL("owned"); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("missing item: got %v, want ErrNotFound", err)
+	}
+	if err := st.Set("owned", []byte("value")); err != nil {
+		t.Fatal(err)
+	}
+	if err := checker.CheckOwnedACL("owned"); err != nil {
+		t.Fatalf("item created in-process refused: %v", err)
+	}
+
+	// -A: any application may read the item without a prompt.
+	if err := security("add-generic-password", "-A", "-s", service, "-a", "planted-any", "-w", "forged"); err != nil {
+		t.Fatal(err)
+	}
+	if err := checker.CheckOwnedACL("planted-any"); !errors.Is(err, ErrNotOwned) {
+		t.Fatalf("item planted with -A: got %v, want ErrNotOwned", err)
+	}
+
+	// -T names one application. The check cannot tell this apart from an
+	// item postern created (the residual risk in DESIGN.md); log it.
+	if err := security("add-generic-password", "-T", "/usr/bin/true", "-s", service, "-a", "planted-named", "-w", "forged"); err != nil {
+		t.Fatal(err)
+	}
+	t.Logf("item planted with -T: CheckOwnedACL = %v", checker.CheckOwnedACL("planted-named"))
 }
 
 func TestKeychainRejectsBadNames(t *testing.T) {
