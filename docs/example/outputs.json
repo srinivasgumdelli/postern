@@ -541,7 +541,7 @@
         "subject": "Status: review done",
         "to": "peer-a"
       },
-      "output": "{\"id\":\"MSG-4\",\"relay_status\":\"relay_auth_failed\",\"status\":\"queued\",\"thread\":\"t-THREAD-2\"}"
+      "output": "{\"id\":\"MSG-4\",\"relay_status\":\"relay_auth_failed\",\"relay_status_detail\":\"The relay rejected this bridge's client certificate; inbound messages are not arriving and outgoing ones are queued. Ask the human to run `postern edge-check`.\",\"status\":\"queued\",\"thread\":\"t-THREAD-2\"}"
     },
     {
       "id": "7.check_inbox_auth_failed",

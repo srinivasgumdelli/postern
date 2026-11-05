@@ -62,6 +62,9 @@ type SendOutput struct {
 	// RelayStatus is set by the server from StatusReporter, not by the
 	// Service; it is omitted while the relay is healthy.
 	RelayStatus string `json:"relay_status,omitempty" jsonschema:"set only when the relay is unhealthy: relay_auth_failed or relay_unreachable"`
+	// RelayStatusDetail is the same sentence check_inbox gives with
+	// relay_status; omitted while the relay is healthy.
+	RelayStatusDetail string `json:"relay_status_detail,omitempty" jsonschema:"plain sentence explaining relay_status"`
 }
 
 // StatusReporter is optionally implemented by a Service. RelayStatus returns
@@ -316,7 +319,7 @@ func (h *handlers) send(ctx context.Context, _ *mcp.CallToolRequest, in SendInpu
 	if err != nil {
 		return nil, SendOutput{}, serviceError(err)
 	}
-	out.RelayStatus, _ = h.relayStatus()
+	out.RelayStatus, out.RelayStatusDetail = h.relayStatus()
 	return nil, out, nil
 }
 
@@ -332,7 +335,7 @@ func (h *handlers) reply(ctx context.Context, _ *mcp.CallToolRequest, in ReplyIn
 	if err != nil {
 		return nil, SendOutput{}, serviceError(err)
 	}
-	out.RelayStatus, _ = h.relayStatus()
+	out.RelayStatus, out.RelayStatusDetail = h.relayStatus()
 	return nil, out, nil
 }
 

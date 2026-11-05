@@ -282,7 +282,7 @@ Once Human B has read everything and is satisfied that nothing in context asks f
 A second run uses a relay that does not accept peer-b's client certificate, as after a revocation, or a rotation the relay was not updated for. A `send` from `review` is queued rather than lost (capture `7.send_auth_failed`):
 
 ```json
-{"id":"MSG-4","relay_status":"relay_auth_failed","status":"queued","thread":"t-THREAD-2"}
+{"id":"MSG-4","relay_status":"relay_auth_failed","relay_status_detail":"The relay rejected this bridge's client certificate; inbound messages are not arriving and outgoing ones are queued. Ask the human to run `postern edge-check`.","status":"queued","thread":"t-THREAD-2"}
 ```
 
 and `check_inbox` says why nothing arrives (capture `7.check_inbox_auth_failed`, `notice` cut):
