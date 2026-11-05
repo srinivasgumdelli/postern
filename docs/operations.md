@@ -103,7 +103,8 @@ Record the date and outcome. Repeat after any change to the edge rules.
 | Bridge refuses to start: config pin mismatch | Something changed the config. Inspect it (relay URL, keychain service, peer keys, sessions). If you made the change, `postern config pin` (it asks you to type a code shown on your terminal); if not, treat it as tampering. |
 | A `postern` command asks for a confirmation code you did not expect | Something tried to change what the bridge trusts. Do not type the code; press Enter to refuse, then find out what ran it. |
 | Thread circuit breaker tripped | Read the thread first. If the loop is understood, `postern thread reset <thread>`. |
-| Relay host or edge account compromised | Content stays sealed. Rotate the edge API token and tunnel credentials, redeploy the relay, rotate client certificates. |
+| Relay host or edge account compromised | Content stays sealed. Rotate the edge API token, tunnel credentials and edge secret ([edge-setup.md](edge-setup.md#edge-secret-rotation)), redeploy the relay, rotate client certificates. |
+| Relay logs show `edge secret rejected` | Something reached the relay without going through the edge (or the transform rule's secret is out of date). The `reason` says whether the header was missing, wrong or repeated. Find what on the relay host or internal network sent it; if the rule was just changed, re-check it against `deploy/secrets/edge-secret`. |
 
 ## Residual risks (v0)
 

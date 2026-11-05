@@ -11,6 +11,7 @@ Placeholders used throughout. Replace them at deploy time; never commit real val
 | `<TUNNEL_UUID>` | the tunnel id printed by `cloudflared tunnel create` |
 | `<PEER_A_CERT_SHA256>`, `<PEER_B_CERT_SHA256>` | SHA-256 fingerprints of each bridge's client certificate |
 | `<CERT_ID>` | the edge's id for an issued client certificate (needed to revoke it) |
+| `<EDGE_SECRET>` | the content of `deploy/secrets/edge-secret` (never paste it anywhere but the transform rule) |
 
 Items marked **(verify against current Cloudflare docs)** could not be confirmed against Cloudflare's documentation when this was written. Check them before relying on them. The verification checklist at the end tests the parts that matter on the real edge.
 
@@ -21,14 +22,18 @@ bridge --HTTPS + client cert--> edge (postern.example.com)
                                   1. mTLS handshake against the Cloudflare-managed CA
                                   2. WAF: block unless cert verified and not revoked
                                   3. transform: SET X-Postern-Client-Cert-Sha256 = cert fingerprint
+                                                SET X-Postern-Edge-Secret       = <EDGE_SECRET>
                                   |
                           tunnel (cloudflared dials out from the relay host)
                                   |
                           relay (Docker, internal network only, no published ports)
+                                  checks the edge secret (constant time); 401 if missing or wrong
                                   maps the fingerprint to a peer name; 401/403 otherwise
 ```
 
-The relay runs in `identity: "header"` mode: it trusts the `X-Postern-Client-Cert-Sha256` header. **That is safe only because the relay is reachable solely through the tunnel.** `docker-compose.yml` publishes no ports, puts the relay on an `internal: true` network shared only with `cloudflared`, and `cmd/postern-relay/compose_test.go` fails if that changes. Never publish the relay's port, never attach it to another network, never add a second ingress route to it. Anyone who can reach the relay directly can claim any identity by sending the header.
+The relay runs in `identity: "header"` mode: it trusts the `X-Postern-Client-Cert-Sha256` header, but only on a request that also carries the edge secret. **That is safe only because the relay is reachable solely through the tunnel.** `docker-compose.yml` publishes no ports, puts the relay on an `internal: true` network shared only with `cloudflared`, and `cmd/postern-relay/compose_test.go` fails if that changes. Never publish the relay's port, never attach it to another network, never add a second ingress route to it.
+
+The edge secret covers what that layout cannot: a process on the relay host, or any container joined to the internal network, can still reach the relay. Without the secret it gets 401 for every `/v1` request, so it cannot poll a peer's mailbox or ack (delete) its messages. Anyone who can read the secret (the file on the relay host, or the transform rule in the dashboard) and reach the relay can still claim any identity. That gets them ciphertext only, but they could drop or ack messages. Keep both as tightly held as the tunnel credentials.
 
 ## 1. Relay host files
 
@@ -41,6 +46,17 @@ mkdir -m 0700 -p deploy/secrets
 ```
 
 These real files are gitignored. `deploy/relay.json` holds certificate fingerprints, which are not secret. The relay refuses to start while it still contains the `<PEER_..._CERT_SHA256>` placeholders; you fill them in at step 6.
+
+Generate the edge secret. It never appears on the terminal, in argv or in shell history:
+
+```sh
+(umask 077 && openssl rand -hex 32 > deploy/secrets/edge-secret)
+chmod 0400 deploy/secrets/edge-secret
+```
+
+- Compose mounts it into the relay at `/run/secrets/edge_secret` (`edge_secret_file` in `relay.json`). `cloudflared` does not get it.
+- The relay refuses to start in header mode without it, if it is shorter than 32 bytes, or if it looks like a placeholder. It reads the file once at start, trims one trailing newline, keeps only a SHA-256 digest and never logs the value.
+- The relay runs as `65532:65532`, and Compose bind-mounts file secrets with the host file's owner and mode. On a Linux host, after you have copied the value into the transform rule (step 8): `sudo chown 65532:65532 deploy/secrets/edge-secret`. Docker Desktop maps file ownership differently; check that the relay starts.
 
 ## 2. Tunnel
 
@@ -153,6 +169,7 @@ cfapi "https://api.cloudflare.com/client/v4/zones/<ZONE_ID>/client_certificates"
   "db": "/data/relay.db",
   "identity": "header",
   "fingerprint_header": "X-Postern-Client-Cert-Sha256",
+  "edge_secret_file": "/run/secrets/edge_secret",
   "peers": {
     "peer-a": ["<PEER_A_CERT_SHA256>"],
     "peer-b": ["<PEER_B_CERT_SHA256>"]
@@ -162,6 +179,7 @@ cfapi "https://api.cloudflare.com/client/v4/zones/<ZONE_ID>/client_certificates"
 }
 ```
 
+- `edge_secret_file` is the path inside the container; leave it as is. It is required in header mode and ignored in `mtls` mode.
 - Fingerprints are 64 hex characters. Case, colons and spaces are normalized. A fingerprint may belong to only one peer.
 - During rotation a peer lists two fingerprints (old and new); remove the old one once the bridge has switched.
 - The relay reads the file only at start: `docker compose restart relay` after every change.
@@ -182,14 +200,18 @@ Security, WAF, Custom rules, Create rule:
 
 Both conditions are needed: `cert_verified` is still true for a valid certificate that has been revoked. The free plan has a small number of custom rules (verify against current Cloudflare docs). This rule must stay enabled and scoped to this hostname.
 
-## 8. Transform rule: set the fingerprint header
+## 8. Transform rule: set the fingerprint and edge secret headers
 
 Rules, Transform Rules, Modify Request Header, Create rule:
 
 - When: custom filter expression `http.host eq "postern.example.com"`.
-- Then: **Set dynamic**, header name `X-Postern-Client-Cert-Sha256`, value `cf.tls_client_auth.cert_fingerprint_sha256`.
+- Then, two operations in the same rule:
+  1. **Set dynamic**, header name `X-Postern-Client-Cert-Sha256`, value `cf.tls_client_auth.cert_fingerprint_sha256`.
+  2. **Set static**, header name `X-Postern-Edge-Secret`, value `<EDGE_SECRET>`.
 
-"Set" overwrites any value the client sent, so a client cannot choose its own identity. When there is no client certificate the field is empty, and a header set to an empty value is removed, so the relay sees no identity (401). The field holds 64 lowercase hex characters. Whether the `cf.tls_client_auth.*` fields are usable in transform rules on your plan: verify against current Cloudflare docs. Checklist items 4 and 5 below prove it works.
+To paste the secret without printing it, copy it to the clipboard on the relay host (`pbcopy < deploy/secrets/edge-secret` on macOS, `xclip -selection clipboard < deploy/secrets/edge-secret` on Linux) and clear the clipboard afterwards. Anyone who can view this rule in the dashboard can read the secret. The API token from step 3 cannot: it has only the SSL and Certificates permission.
+
+"Set" overwrites any value the client sent, so a client cannot choose its own identity or learn anything by sending its own edge secret. When there is no client certificate the field is empty, and a header set to an empty value is removed, so the relay sees no identity (401). The field holds 64 lowercase hex characters. Whether the `cf.tls_client_auth.*` fields are usable in transform rules on your plan: verify against current Cloudflare docs. Checklist items 4 and 5 below prove it works.
 
 Request header transform rules run in the `http_request_late_transform` phase. Where that sits relative to WAF custom rules does not matter here: the WAF blocks no-certificate requests either way, and the header always comes from the edge.
 
@@ -211,6 +233,29 @@ Then run the verification checklist below.
 3. Add the new fingerprint next to the old one in `relay.json`, then `docker compose restart relay`.
 4. The bridge imports the certificate and checks it (`postern cert import`, `postern edge-check`).
 5. Remove the old fingerprint, restart the relay, and revoke the old certificate.
+
+## Edge secret rotation
+
+Rotate the edge secret when someone who could read it (the file, or the transform rule) no longer should, when you suspect it leaked, when the relay host or edge account may be compromised, and whenever you rotate the tunnel credentials. The relay accepts one secret at a time, so requests between steps 2 and 3 get 401; bridges retry with backoff, so keep the gap short.
+
+1. On the relay host, generate the new value next to the old one:
+
+   ```sh
+   (umask 077 && openssl rand -hex 32 > deploy/secrets/edge-secret.new)
+   ```
+
+2. Edit the transform rule (step 8): replace the static `X-Postern-Edge-Secret` value with the content of `edge-secret.new`, and deploy the rule.
+3. Immediately swap the file and recreate the relay. The secret is a bind mount, and replacing the file creates a new inode, so recreate the container rather than restarting it:
+
+   ```sh
+   mv deploy/secrets/edge-secret.new deploy/secrets/edge-secret
+   chmod 0400 deploy/secrets/edge-secret
+   sudo chown 65532:65532 deploy/secrets/edge-secret     # Linux host
+   docker compose up -d --force-recreate relay
+   ```
+
+   (Use `sudo mv` if the old file is owned by `65532`.)
+4. Check: `postern edge-check` passes on each bridge, verification item 8 below still gets 401, and `docker compose logs relay` shows no `edge secret rejected` events after the restart.
 
 ## Verification checklist
 
@@ -249,6 +294,8 @@ An edge rejection is Cloudflare's HTML block page. A relay rejection is JSON lik
    curl -sS --cert edge-test.pem --key edge-test-key.pem 'https://postern.example.com/v1/poll?to=peer-a&timeout=0'
    ```
 
+   `{"error":"no_identity"}` (401) instead means the edge secret did not arrive or does not match `deploy/secrets/edge-secret`: check the second operation of the transform rule, and `docker compose logs relay` for the `edge secret rejected` reason.
+
 5. **The edge overwrites a client-sent header.** Same certificate, now also claiming peer-a's fingerprint. Expect `{"error":"forbidden"}` again. A 200 here means the transform rule is not overwriting the header: stop and fix it.
 
    ```sh
@@ -268,6 +315,25 @@ An edge rejection is Cloudflare's HTML block page. A relay rejection is JSON lik
    curl -m 3 http://127.0.0.1:8080/healthz             # must fail: nothing listens on the host
    ```
 
-8. **Real bridges work end to end.** On each machine, `postern edge-check` succeeds.
+8. **A request that skips the edge cannot claim an identity.** This is what a process on the relay host or the internal network would try: go straight to the relay's internal address with a peer's fingerprint and no edge secret. **Verification step only:** it attaches a throwaway container to the internal network for one request and removes it (`--rm`). Never leave a container attached to `postern_relay-internal`.
 
-9. **Logs carry no content.** `docker compose logs relay` shows method, route, status, bytes, duration and peer only. No query strings, no bodies, no client addresses.
+   ```sh
+   # healthz needs no identity: proves the request reached the relay. Expect "ok".
+   docker run --rm --network postern_relay-internal curlimages/curl:8.11.1 \
+     -sS -m 5 http://relay:8080/healthz
+   # No edge secret. Expect {"error":"no_identity"} and 401.
+   docker run --rm --network postern_relay-internal curlimages/curl:8.11.1 \
+     -sS -m 5 -w '\n%{http_code}\n' -H 'X-Postern-Client-Cert-Sha256: <PEER_A_CERT_SHA256>' \
+     'http://relay:8080/v1/poll?to=peer-a&timeout=0'
+   # A wrong edge secret. Expect {"error":"no_identity"} and 401.
+   docker run --rm --network postern_relay-internal curlimages/curl:8.11.1 \
+     -sS -m 5 -w '\n%{http_code}\n' -H 'X-Postern-Client-Cert-Sha256: <PEER_A_CERT_SHA256>' \
+     -H 'X-Postern-Edge-Secret: 0000000000000000000000000000000000000000000000000000000000000000' \
+     'http://relay:8080/v1/poll?to=peer-a&timeout=0'
+   ```
+
+   A 200 on either `/v1/poll` request means the relay is not checking the edge secret: stop the stack and fix it. `<PEER_A_CERT_SHA256>` is a fingerprint, not a secret; never put the real edge secret on a command line. (`curlimages/curl` is just a small image with curl; pin whichever current tag you trust.)
+
+9. **Real bridges work end to end.** On each machine, `postern edge-check` succeeds. It goes through the edge, which adds the edge secret, so it needs no access to the secret.
+
+10. **Logs carry no content or secrets.** `docker compose logs relay` shows method, route, status, bytes, duration and peer only. No query strings, no bodies, no client addresses, no header values. Item 8 adds `edge secret rejected` events with a `reason` (`missing`, `mismatch` or `multiple`) and nothing else.

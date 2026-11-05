@@ -98,7 +98,7 @@ All requests arrive through the tunnel after the edge has checked the client cer
 | POST | `/v1/ack/{id}` | `to` | marks delivered; relay may delete on ack |
 | GET | `/healthz` | | no auth beyond the edge |
 
-Identity binding (v0). The relay maps the client certificate's SHA-256 fingerprint to a peer name and rejects any `from` (post) or `to` (poll, ack) that doesn't match: 403. In production a Cloudflare transform rule *sets* `X-Postern-Client-Cert-Sha256` from `cf.tls_client_auth.cert_fingerprint_sha256` (overwriting any client-supplied value); this is safe only because the relay is reachable solely through the tunnel. In dev and tests the relay terminates mTLS itself and computes the fingerprint. No identity: 401.
+Identity binding (v0). The relay maps the client certificate's SHA-256 fingerprint to a peer name and rejects any `from` (post) or `to` (poll, ack) that doesn't match: 403. In production a Cloudflare transform rule *sets* `X-Postern-Client-Cert-Sha256` from `cf.tls_client_auth.cert_fingerprint_sha256` (overwriting any client-supplied value); this is safe only because the relay is reachable solely through the tunnel. The same rule also sets `X-Postern-Edge-Secret` to a static random value (at least 32 bytes, `openssl rand -hex 32`) that the relay reads at startup from `edge_secret_file` (a Docker secret). In header mode the relay checks that header first, comparing SHA-256 digests in constant time: missing, wrong or repeated is 401 `no_identity`, logged as a fixed event without the value. Only then does it map the fingerprint. This stops a process on the relay host or a container on the internal network, which can reach the relay without the tunnel, from claiming an identity. mtls mode ignores the secret. In dev and tests the relay terminates mTLS itself and computes the fingerprint. No identity: 401.
 
 Replay window (v0). The relay rejects envelopes whose `ts` is more than 10 minutes from its clock (422) and remembers ids for 72 hours (409). Senders reseal queued messages with a fresh `ts` on each retry, keeping the same id.
 
@@ -128,6 +128,7 @@ Inner message (inside `box`): a 4-byte big-endian header length, a JSON header `
 | mTLS client cert + key | OS keychain | bridge only |
 | Edge API token (one zone) | operator's keychain | operator, issuing/revoking certs |
 | Tunnel credentials | Docker secret on relay host | cloudflared only |
+| Edge secret (static header value) | Docker secret on relay host; the edge's transform rule | edge sets it, relay checks it (digest only in memory) |
 
 Never in a repo, never in env vars an agent can read, never on the relay, never inside a message. Peers exchange public keys once and compare fingerprints out of band (in person or on a call).
 
@@ -137,7 +138,8 @@ v1 option: hardware-bound keys via `age-plugin-se` (Secure Enclave) or `age-plug
 
 | Event | Impact | Mitigation |
 |---|---|---|
-| Relay host or edge account compromised | ciphertext only; can drop/delay | rotate token + tunnel creds, redeploy |
+| Relay host or edge account compromised | ciphertext only; can drop/delay | rotate token + tunnel creds + edge secret, redeploy |
+| Process on the relay host or internal network impersonates a peer (reaches the relay without the tunnel and sends a fingerprint header) | could poll a peer's ciphertext, or ack and so delete its messages | edge secret: the edge sets a static secret header, and the relay rejects any `/v1` request without it (401) before identity mapping. Residual: anyone who can read the secret file or the transform rule can still impersonate (ciphertext only; can drop or ack messages). Rotate the secret if either may have been read |
 | Client cert leaks | can reach relay; can't read or forge | revoke cert, reissue |
 | Machine stolen with cert + key | read/send as that peer until revoked | revoke cert, rotate key pairs; hardware keys prevent extraction |
 | Malicious or confused message (prompt injection) | untrusted note in a session | session rule + PreToolUse hook (Claude Code) / approval policy (Codex) force human approval for any tool call while unread external content is in context; tags and data framing |
