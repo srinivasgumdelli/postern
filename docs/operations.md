@@ -68,7 +68,7 @@ postern guard install --project /path/to/project
 
 This installs the guard hooks, the `/postern-clear` command and the `postern` skill. Then add the session rule from [`examples/session-rule.md`](../examples/session-rule.md) to that project's `CLAUDE.md`.
 
-Codex: `postern guard install-codex` installs the skill; then follow [`examples/codex/config.toml`](../examples/codex/config.toml) (project marked untrusted; never `on-request` or `never`).
+Codex: `postern guard install-codex` installs the skill; then follow [`examples/codex/config.toml`](../examples/codex/config.toml) in the user-level `~/.codex/config.toml` (project marked untrusted, `read-only` sandbox; never `on-request` or `never`), install [`examples/codex/rules/postern.rules`](../examples/codex/rules/postern.rules) as `~/.codex/rules/postern.rules`, and add the session rule to the project's `AGENTS.md`. Details: [session-guard.md](session-guard.md#codex).
 
 Do not run these sessions in bypass or auto-approve modes.
 
