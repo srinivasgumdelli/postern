@@ -15,6 +15,7 @@ import (
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 
 	"postern/internal/config"
+	"postern/internal/presence"
 	"postern/internal/secrets"
 )
 
@@ -31,10 +32,12 @@ type Env struct {
 	// Executable returns the absolute path of the running binary.
 	Executable func() (string, error)
 	// Confirm asks the human to approve a change to what the bridge
-	// trusts (keys, peers, sessions, the config pin). Production reads a
-	// one-time code from the controlling terminal, so a command run by an
-	// agent without a terminal cannot confirm.
-	Confirm func(summary string) error
+	// trusts (keys, peers, sessions, the config pin, the client key).
+	// reason is a short phrase for the system dialog; summary is the full
+	// change. Production prints the summary to Stdout, then asks the OS
+	// for user presence (Touch ID or the login password), which an agent
+	// cannot answer through a terminal. Tests inject their own.
+	Confirm func(reason, summary string) error
 	Version string
 }
 
@@ -46,14 +49,14 @@ func DefaultEnv(version string) Env {
 		Stderr:     os.Stderr,
 		OpenStore:  secrets.NewKeychain,
 		Executable: os.Executable,
-		Confirm:    ttyConfirm,
+		Confirm:    presenceConfirm(os.Stdout, presence.Confirm),
 		Version:    version,
 	}
 }
 
 const usage = `postern - encrypted side gate between agent sessions
 
-Setup (run these yourself, not through an agent):
+Setup (run these yourself; changes ask for Touch ID or your login password):
   postern init --peer-name NAME --relay-url URL [--session NAME]...
   postern show
   postern peer add --name NAME --public-key KEY --fingerprint FP
@@ -190,8 +193,8 @@ func loadPinned(env Env, flagValue string) (*loaded, error) {
 }
 
 // save asks the human to confirm, then writes the config and re-pins it.
-func (l *loaded) save(env Env, what string) error {
-	if err := confirm(env, what+"\n\n"+describe(l.path, l.cfg)); err != nil {
+func (l *loaded) save(env Env, reason, what string) error {
+	if err := confirm(env, reason, what+"\n\n"+describe(l.path, l.cfg)); err != nil {
 		return err
 	}
 	raw, err := config.Save(l.path, l.cfg)
@@ -199,13 +202,6 @@ func (l *loaded) save(env Env, what string) error {
 		return err
 	}
 	return config.Pin(l.pinStore, l.path, raw)
-}
-
-func confirm(env Env, summary string) error {
-	if env.Confirm == nil {
-		return errors.New("no way to confirm with the human")
-	}
-	return env.Confirm(summary)
 }
 
 // describe summarises what a config makes the bridge trust.

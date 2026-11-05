@@ -61,10 +61,12 @@ func cmdInit(env Env, args []string) error {
 		}
 	}
 	what := "Initialise this bridge: generate new keys and trust this config."
+	reason := "set up the bridge as " + cfg.PeerName
 	if *force {
 		what = "Re-initialise this bridge: REPLACE its keys (peers must re-pin the new public key) and trust this config."
+		reason = "replace the keys of bridge " + cfg.PeerName
 	}
-	if err := confirm(env, what+"\n\n"+describe(path, cfg)); err != nil {
+	if err := confirm(env, reason, what+"\n\n"+describe(path, cfg)); err != nil {
 		return err
 	}
 
@@ -194,7 +196,7 @@ func cmdPeerAdd(env Env, args []string) error {
 	if err := l.cfg.Validate(); err != nil {
 		return err
 	}
-	if err := l.save(env, fmt.Sprintf("Trust peer %s with fingerprint\n  %s\nOnly confirm if you compared this fingerprint with the peer out of band.", *name, want)); err != nil {
+	if err := l.save(env, "trust peer "+*name, fmt.Sprintf("Trust peer %s with fingerprint\n  %s\nOnly approve if you compared this fingerprint with the peer out of band.", *name, want)); err != nil {
 		return err
 	}
 	fmt.Fprintf(env.Stdout, "Added peer %s (%s). Config re-pinned.\n", *name, want)
@@ -216,7 +218,7 @@ func cmdPeerRemove(env Env, args []string) error {
 		return fmt.Errorf("no peer %q", *name)
 	}
 	l.cfg.Peers = slices.Delete(l.cfg.Peers, i, i+1)
-	if err := l.save(env, "Stop trusting peer "+*name+"."); err != nil {
+	if err := l.save(env, "stop trusting peer "+*name, "Stop trusting peer "+*name+"."); err != nil {
 		return err
 	}
 	fmt.Fprintf(env.Stdout, "Removed peer %s. Config re-pinned.\n", *name)
@@ -262,7 +264,11 @@ func editSessions(env Env, cmd string, args []string, edit func(*config.Config, 
 	if err := l.cfg.Validate(); err != nil {
 		return err
 	}
-	if err := l.save(env, "Change which sessions may use this bridge ("+cmd+" "+fs.Arg(0)+")."); err != nil {
+	reason := "allow session " + fs.Arg(0) + " to use the bridge"
+	if cmd == "session remove" {
+		reason = "remove session " + fs.Arg(0) + " from the bridge"
+	}
+	if err := l.save(env, reason, "Change which sessions may use this bridge ("+cmd+" "+fs.Arg(0)+")."); err != nil {
 		return err
 	}
 	fmt.Fprintf(env.Stdout, "Sessions: %s. Config re-pinned.\n", strings.Join(l.cfg.Sessions, ", "))
@@ -290,7 +296,7 @@ func cmdConfigPin(env Env, args []string) error {
 	}
 	summary := fmt.Sprintf("Pin this config as trusted (sha256 %s).\nCheck every line; anything you did not change yourself is tampering.\n\n%s",
 		config.Digest(raw), describe(path, cfg))
-	if err := confirm(env, summary); err != nil {
+	if err := confirm(env, "pin the bridge config", summary); err != nil {
 		return err
 	}
 	if err := config.Pin(pinStore, path, raw); err != nil {

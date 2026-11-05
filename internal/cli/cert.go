@@ -91,6 +91,13 @@ func cmdCertImport(env Env, args []string) error {
 		if err != nil || !tlsutil.CertMatchesKey(cert, next) {
 			return errors.New("certificate does not match this bridge's client key (or a pending rotated key)")
 		}
+		// Promoting the rotated key changes the identity this bridge
+		// presents to the relay, so the human approves it.
+		summary := fmt.Sprintf("Switch %s to its new client key and this certificate.\nSHA-256: %s\nSubject: %s\nExpires: %s\nThe current client key is replaced.",
+			l.cfg.PeerName, tlsutil.Fingerprint(cert.Raw), cert.Subject.CommonName, cert.NotAfter.UTC().Format(time.RFC3339))
+		if err := confirm(env, "switch to a new client key", summary); err != nil {
+			return err
+		}
 		nextDER, err := l.store.Get(nextTLSKey)
 		if err != nil {
 			return err

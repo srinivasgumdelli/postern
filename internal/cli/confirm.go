@@ -1,49 +1,45 @@
 package cli
 
 import (
-	"bufio"
-	"crypto/rand"
 	"errors"
 	"fmt"
-	"os"
-	"strings"
+	"io"
+
+	"postern/internal/presence"
 )
 
-var errNotConfirmed = errors.New("not confirmed")
+var errNotConfirmed = errors.New("not approved; nothing changed")
 
-// ttyConfirm shows the summary on the controlling terminal and asks for
-// a one-time code printed only there. The code never reaches stdout, so
-// a process that captures this command's output (an agent's shell tool)
-// cannot read it back, and with no terminal at all the change is refused.
-// This raises the bar for same-user processes; it is not a boundary
-// against one that can inject keystrokes into the terminal.
-func ttyConfirm(summary string) error {
-	tty, err := os.OpenFile("/dev/tty", os.O_RDWR, 0)
-	if err != nil {
-		return errors.New("this change needs a human at a terminal; run the command yourself, not through an agent")
+// presenceConfirm is the production Env.Confirm. It prints the full
+// summary of the change to w, then asks the operating system for user
+// presence (Touch ID or the login password) with the short reason. The
+// dialog is drawn by the OS, so an agent that runs this command through
+// a pseudo-terminal cannot see or answer it. If the check is
+// unsupported or unavailable (no GUI session, SSH, another platform),
+// the change is refused; there is no weaker fallback.
+func presenceConfirm(w io.Writer, check func(reason string) error) func(reason, summary string) error {
+	return func(reason, summary string) error {
+		fmt.Fprintf(w, "\n%s\nApprove this change with Touch ID or your login password in the system dialog.\n", summary)
+		switch err := check(reason); {
+		case err == nil:
+			return nil
+		case errors.Is(err, presence.ErrDenied):
+			fmt.Fprintln(w, "Not approved; nothing changed.")
+			return errNotConfirmed
+		case errors.Is(err, presence.ErrUnsupported), errors.Is(err, presence.ErrUnavailable):
+			return fmt.Errorf("this change needs the human's approval with Touch ID or the login password, in a logged-in macOS GUI session on this machine; nothing changed (%v)", err)
+		default:
+			return fmt.Errorf("could not get the human's approval; nothing changed: %w", err)
+		}
 	}
-	defer tty.Close()
-	code := oneTimeCode()
-	fmt.Fprintf(tty, "\n%s\nIf this is what you want, type %s and press Enter: ", summary, code)
-	line, err := bufio.NewReader(tty).ReadString('\n')
-	if err != nil {
-		return errNotConfirmed
-	}
-	if strings.ToUpper(strings.TrimSpace(line)) != code {
-		fmt.Fprintln(tty, "Not confirmed; nothing changed.")
-		return errNotConfirmed
-	}
-	return nil
 }
 
-func oneTimeCode() string {
-	const alphabet = "ABCDEFGHJKMNPQRSTUVWXYZ23456789"
-	b := make([]byte, 6)
-	if _, err := rand.Read(b); err != nil {
-		panic("crypto/rand: " + err.Error())
+// confirm asks the human to approve a change to what the bridge trusts.
+// reason is a short phrase for the system dialog ("trust peer peer-b");
+// summary is the full description printed before it.
+func confirm(env Env, reason, summary string) error {
+	if env.Confirm == nil {
+		return errors.New("no way to get the human's approval; nothing changed")
 	}
-	for i := range b {
-		b[i] = alphabet[int(b[i])%len(alphabet)]
-	}
-	return string(b)
+	return env.Confirm(reason, summary)
 }

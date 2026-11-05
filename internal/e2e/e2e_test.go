@@ -67,7 +67,7 @@ type node struct {
 	session string
 	cfg     string
 	logs    *syncBuffer
-	confirm func(string) error
+	confirm func(reason, summary string) error
 
 	mu     sync.Mutex
 	stores map[string]*secretstest.Memory // one per keychain service, like the real keychain
@@ -77,7 +77,7 @@ func newNode(t *testing.T, name, session string) *node {
 	dir := t.TempDir()
 	return &node{
 		name: name, session: session, cfg: filepath.Join(dir, "config.json"), logs: &syncBuffer{},
-		confirm: func(string) error { return nil }, // the operator says yes
+		confirm: func(string, string) error { return nil }, // the operator says yes
 		stores:  map[string]*secretstest.Memory{},
 	}
 }
@@ -98,7 +98,7 @@ func (n *node) env(stdout io.Writer) cli.Env {
 		Stderr:     n.logs,
 		OpenStore:  func(s string) (secrets.Store, error) { return n.store(s), nil },
 		Executable: os.Executable,
-		Confirm:    func(s string) error { return n.confirm(s) },
+		Confirm:    func(r, s string) error { return n.confirm(r, s) },
 		Version:    "test",
 	}
 }
@@ -572,8 +572,11 @@ func TestChangesNeedTheHuman(t *testing.T) {
 	w := setup(t)
 	before, _ := os.ReadFile(w.a.cfg)
 	var asked int
-	w.a.confirm = func(summary string) error {
+	w.a.confirm = func(reason, summary string) error {
 		asked++
+		if reason == "" {
+			t.Error("empty reason for the system dialog")
+		}
 		if !strings.Contains(summary, "peer-a") {
 			t.Errorf("confirmation summary does not describe the config:\n%s", summary)
 		}
@@ -590,7 +593,7 @@ func TestChangesNeedTheHuman(t *testing.T) {
 	if !bytes.Equal(before, after) {
 		t.Fatal("config changed without confirmation")
 	}
-	w.a.confirm = func(string) error { return nil }
+	w.a.confirm = func(string, string) error { return nil }
 	w.a.run(t, 0, "show")
 }
 
