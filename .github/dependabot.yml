@@ -1,14 +1,27 @@
 version: 2
+# Releases must be at least 14 days old before Dependabot proposes them.
 updates:
   - package-ecosystem: gomod
     directory: /
     schedule:
       interval: weekly
+    cooldown:
+      default-days: 14
   - package-ecosystem: github-actions
     directory: /
     schedule:
       interval: weekly
+    cooldown:
+      default-days: 14
   - package-ecosystem: docker
     directory: /
     schedule:
       interval: weekly
+    cooldown:
+      default-days: 14
+  - package-ecosystem: npm
+    directory: /relay-worker
+    schedule:
+      interval: weekly
+    cooldown:
+      default-days: 14
