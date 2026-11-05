@@ -1,7 +1,7 @@
 # syntax=docker/dockerfile:1
 
 # Builder: pinned Go toolchain (tag and digest).
-FROM golang:1.26.9-bookworm@sha256:d9c68c2c51161e12fd77e4c6320687c9cd86e1af1e3ad6e6cd63ff970641453c AS build
+FROM golang:1.27.3-bookworm@sha256:d9b6a1beb9474adc2a1ce842573639b44b2a0dd49b6669f51d3821baf9ec37c9 AS build
 WORKDIR /src
 ENV CGO_ENABLED=0 GOFLAGS=-mod=readonly GOTOOLCHAIN=local
 COPY go.mod go.sum ./
