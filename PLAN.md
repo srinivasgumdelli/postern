@@ -20,7 +20,7 @@ Acceptance for v0:
 - Request without a valid client cert never reaches the relay (verified against the real edge).
 - Relay DB contains no plaintext subject/body (grep test).
 - Tampered or wrongly-addressed envelopes are dropped.
-- An agent session without the MCP config cannot send.
+- An agent session without the MCP config and without shell or command tools cannot send. A session with shell access can run the bridge binary directly (`postern mcp`); that is a documented same-user residual risk (docs/session-guard.md), softened by the Claude Code guard asking before any recognisable `postern mcp`/`postern hook` command and tainting the session on framed output, and by the Codex approval policy asking before commands.
 - Inbound messages show `origin=external, trust=untrusted`.
 - An inbound message never triggers a tool call without the human's approval (hook/approval policy enforced, injection fixture passes).
 

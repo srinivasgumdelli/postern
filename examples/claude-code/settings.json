@@ -14,7 +14,7 @@
     ],
     "PostToolUse": [
       {
-        "matcher": "mcp__postern__check_inbox",
+        "matcher": "*",
         "hooks": [
           {
             "type": "command",

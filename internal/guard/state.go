@@ -50,8 +50,8 @@ var (
 
 // maxScanLine bounds the bytes of one transcript line held for the exact
 // match. Longer lines are judged by streaming flags instead: any line that
-// contains both "tool_use" and "__check_inbox" anywhere counts (fail
-// closed).
+// contains both "tool_use" and "__check_inbox", or "POSTERN MESSAGE", or
+// both "external" and "untrusted", anywhere counts (fail closed).
 var maxScanLine = 1 << 20
 
 const (
@@ -374,7 +374,9 @@ func (f *substrFlag) feed(seg []byte) {
 func (f *substrFlag) reset() { f.tail, f.seen = f.tail[:0], false }
 
 // scanLines streams r line by line and reports whether some line is a
-// check_inbox tool call (see toolUseTypeRe) that does not contain exclude,
+// check_inbox tool call (see toolUseTypeRe) or shows Postern's untrusted
+// framing in any form (see HasUntrustedFraming: a fork of a session that
+// read the inbox through some other tool), and does not contain exclude,
 // and how many bytes up to and including the last newline were consumed.
 // Reading more than limit bytes is an error.
 func scanLines(r io.Reader, exclude []byte, limit int64) (found bool, complete int64, err error) {
@@ -384,13 +386,17 @@ func scanLines(r io.Reader, exclude []byte, limit int64) (found bool, complete i
 		overflow bool
 		toolUse  = &substrFlag{needle: []byte("tool_use")}
 		inbox    = &substrFlag{needle: []byte("__check_inbox")}
+		delim    = &substrFlag{needle: []byte("POSTERN MESSAGE")}
+		external = &substrFlag{needle: []byte("external")}
+		untrstd  = &substrFlag{needle: []byte("untrusted")}
 		excl     = &substrFlag{needle: exclude}
 		chunk    = make([]byte, 64*1024)
+		flags    = []*substrFlag{toolUse, inbox, delim, external, untrstd, excl}
 	)
 	feed := func(seg []byte) {
-		toolUse.feed(seg)
-		inbox.feed(seg)
-		excl.feed(seg)
+		for _, f := range flags {
+			f.feed(seg)
+		}
 		if !overflow {
 			if len(line)+len(seg) > maxScanLine {
 				overflow, line = true, line[:0]
@@ -405,14 +411,14 @@ func scanLines(r io.Reader, exclude []byte, limit int64) (found bool, complete i
 		case excl.seen:
 			hit = false
 		case overflow:
-			hit = toolUse.seen && inbox.seen
+			hit = (toolUse.seen && inbox.seen) || delim.seen || (external.seen && untrstd.seen)
 		default:
-			hit = toolUseTypeRe.Match(line) && inboxNameRe.Match(line)
+			hit = (toolUseTypeRe.Match(line) && inboxNameRe.Match(line)) || HasUntrustedFraming(line)
 		}
 		line, overflow = line[:0], false
-		toolUse.reset()
-		inbox.reset()
-		excl.reset()
+		for _, f := range flags {
+			f.reset()
+		}
 		return hit
 	}
 	for {

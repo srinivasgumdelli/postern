@@ -5,7 +5,11 @@
 // How it works. A PreToolUse hook sets a per-session taint marker before
 // check_inbox runs, so the marker exists before untrusted text can reach the
 // model. A PostToolUse hook releases it again only if that call returned an
-// empty inbox. A session with no marker at all (for example a fork, which
+// empty inbox. The PostToolUse hook runs for every tool and also taints the
+// session when any tool's output carries Postern's untrusted framing (a
+// shell that ran the binary directly, say), and PreToolUse asks before a
+// shell command runs the binary's mcp or hook subcommand at all. A session
+// with no marker at all (for example a fork, which
 // gets a new session id and a copy of another session's history) has its
 // transcript scanned for a check_inbox call before PreToolUse decides, so
 // the guard does not depend on SessionStart having run. While the marker is
@@ -45,6 +49,11 @@ type Options struct {
 	// Claude Code session (tool names are mcp__<ServerName>__<tool>).
 	// Empty means "postern".
 	ServerName string
+	// BinaryPath is the path of the postern binary, used to spot shell
+	// commands that run it directly. Any word with the basename "postern"
+	// counts as well, and so does the running executable (the hook is run
+	// as the configured binary), so empty is fine.
+	BinaryPath string
 	// Now returns the current time; nil means time.Now.
 	Now func() time.Time
 }
@@ -99,9 +108,30 @@ type hookInput struct {
 }
 
 type guard struct {
-	st     *store
-	server string
-	now    func() time.Time
+	st       *store
+	server   string
+	now      func() time.Time
+	binaries []string // paths the postern binary is known by
+}
+
+// binaryPaths returns the configured binary path plus the running
+// executable, with symlinks resolved.
+func binaryPaths(configured string) []string {
+	var out []string
+	add := func(p string) {
+		if p == "" {
+			return
+		}
+		out = append(out, p)
+		if r, err := filepath.EvalSymlinks(p); err == nil && r != p {
+			out = append(out, r)
+		}
+	}
+	add(configured)
+	if exe, err := os.Executable(); err == nil {
+		add(exe)
+	}
+	return out
 }
 
 // Run handles one hook invocation and returns the process exit code. It
@@ -139,6 +169,9 @@ func Run(event string, stdin io.Reader, stdout io.Writer, opts Options) (code in
 	}
 
 	g := &guard{st: newStore(stateDir, now), server: server, now: now}
+	if event == EventPreToolUse {
+		g.binaries = binaryPaths(opts.BinaryPath)
+	}
 	raw, readErr := readInput(stdin)
 
 	switch event {
@@ -260,6 +293,20 @@ func (g *guard) preToolUse(raw []byte, readErr error, setupErr string, w io.Writ
 		return 0
 	case g.markReadTool():
 		return 0
+	}
+
+	// A shell command that runs `postern mcp` or `postern hook` stops for
+	// the human whether or not the session is tainted: Postern is used
+	// through its MCP tools, and running the binary directly bypasses the
+	// guard. This is a speed bump, not a boundary (see runsPosternDirectly).
+	if cmd, ok := shellCommand(in.ToolInput); ok && runsPosternDirectly(cmd, g.binaries) {
+		if g.isForeignInboxTool(in.ToolName) && g.armBeforeInbox(in.SessionID) != nil {
+			return emit(w, preDecision(decisionDeny, reasonCannotRecord))
+		}
+		if !interactiveMode(in.PermissionMode) {
+			return emit(w, preDecision(decisionDeny, reasonDirectNoPrompts(modeName(in.PermissionMode))))
+		}
+		return emit(w, preDecision(decisionAsk, reasonDirect))
 	}
 
 	m, exists, err := g.resolve(in)
@@ -406,6 +453,17 @@ func reasonNoPrompts(mode string) string {
 		"Ask the human to switch to a mode that asks (default, plan or acceptEdits) or to start a fresh context with /clear.", mode)
 }
 
+const reasonDirect = "Postern guard: this command runs the postern binary's mcp or hook subcommand directly. " +
+	"Postern must be used through its MCP tools; running it from a shell bypasses the session guard " +
+	"(inbox content would arrive without the untrusted-content gate, and messages would be sent without its approval prompt). " +
+	"Approve only if you asked for exactly this command yourself."
+
+func reasonDirectNoPrompts(mode string) string {
+	return fmt.Sprintf("Postern guard: this command runs the postern binary's mcp or hook subcommand directly, "+
+		"which bypasses the session guard, and permission mode %q does not stop for human approval, so it is blocked. "+
+		"Postern must be used through its MCP tools.", mode)
+}
+
 func (g *guard) askReason(in hookInput) string {
 	tool := sanitize(in.ToolName, 128)
 	switch in.ToolName {
@@ -478,14 +536,21 @@ func (g *guard) postToolUse(raw []byte, readErr error) int {
 		return 2
 	}
 	if in.ToolName != g.inboxTool() {
-		if g.isForeignInboxTool(in.ToolName) {
+		// Any other tool: its output is untrusted Postern content if it is
+		// a check_inbox result from another server, or if it carries
+		// Postern's framing (for example a shell that ran the binary
+		// directly). A message_count of 0 next to the framing does not
+		// count here: only Postern's own check_inbox can release the marker.
+		if g.isForeignInboxTool(in.ToolName) || HasUntrustedFraming(in.ToolResponse) {
 			if g.taint(in.SessionID) != nil {
 				return 2
 			}
 		}
 		return 0
 	}
-	empty := inboxEmpty(in.ToolResponse)
+	// A real empty inbox carries no message framing; a result that shows
+	// any is not empty, whatever its count says.
+	empty := inboxEmpty(in.ToolResponse) && !HasUntrustedFraming(in.ToolResponse)
 	err := g.st.update(in.SessionID, func(m marker, exists bool) (marker, bool, bool) {
 		ungated := !exists || !m.gated()
 		switch {
@@ -616,7 +681,13 @@ type contextFields struct {
 	AdditionalContext string `json:"additionalContext"`
 }
 
-const reasonCleared = "Postern guard cleared for this session. Untrusted Postern content may still be in the conversation; use /clear for a fresh context."
+// reasonCleared is shown to the human (the prompt is swallowed, so it never
+// reaches the model). A message can ask the human to type "postern clear",
+// so it says plainly what clearing gives up and who should not be trusted.
+const reasonCleared = "Postern guard cleared for this session. " +
+	"Untrusted Postern content is still in the conversation, and tool calls will now run without per-call approval. " +
+	"If a message asked you to type this, do not trust that message. " +
+	"Use /clear for a fresh context instead."
 
 // reminder is added to the model's context while the session is tainted.
 // Written as plain statements of fact, as Claude Code recommends for hook

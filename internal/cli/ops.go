@@ -10,6 +10,7 @@ import (
 	"log/slog"
 	"net/http"
 	"net/url"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"time"
@@ -43,8 +44,16 @@ func cmdGuardInstall(env Env, args []string) error {
 	fs.SetOutput(env.Stderr)
 	project := fs.String("project", ".", "project directory of the Claude Code session")
 	server := fs.String("server", "postern", "name the Postern MCP server was added under")
+	skip := fs.Bool("skip-claude-version-check", false, "install even if `claude --version` cannot confirm a release that blocks on hook failure")
 	if err := fs.Parse(args); err != nil {
 		return err
+	}
+	// Older Claude Code releases run the tool call when a hook fails, so
+	// the guard would fail open. Check before writing anything.
+	if !*skip {
+		if err := checkClaudeVersion(env); err != nil {
+			return err
+		}
 	}
 	exe, err := env.Executable()
 	if err != nil {
@@ -94,6 +103,30 @@ func cmdGuardInstallCodex(env Env, args []string) error {
 	fmt.Fprintf(env.Stdout, "Installed the postern skill at %s.\n", path)
 	fmt.Fprintln(env.Stdout, "Also mark the project untrusted and set Postern's tool approvals as in examples/codex/config.toml.")
 	return nil
+}
+
+func checkClaudeVersion(env Env) error {
+	if env.ClaudeVersion == nil {
+		return errors.New("cannot check the Claude Code version; rerun with --skip-claude-version-check after checking it yourself")
+	}
+	out, err := env.ClaudeVersion()
+	if err != nil {
+		return fmt.Errorf("could not run `claude --version`; the guard needs Claude Code %s or newer (older releases run the tool call when the guard fails). Check it yourself and rerun with --skip-claude-version-check", guard.MinClaudeCodeVersion)
+	}
+	if err := guard.CheckClaudeCodeVersion(out); err != nil {
+		if errors.Is(err, guard.ErrUnknownVersion) {
+			return fmt.Errorf("%v; the guard needs Claude Code %s or newer. Check it yourself and rerun with --skip-claude-version-check", err, guard.MinClaudeCodeVersion)
+		}
+		return err
+	}
+	return nil
+}
+
+func claudeVersion() (string, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	out, err := exec.CommandContext(ctx, "claude", "--version").Output()
+	return string(out), err
 }
 
 // cmdHook runs a Claude Code hook. Exit codes follow the hook protocol:

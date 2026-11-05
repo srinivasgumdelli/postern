@@ -1,0 +1,50 @@
+# Codex exec-policy rules for a session that receives Postern messages.
+#
+# Install as a user-level rules file: ~/.codex/rules/postern.rules (or
+# $CODEX_HOME/rules/postern.rules). Project-level rules are ignored for an
+# untrusted project, like the rest of the project's .codex/ layer.
+#
+# Under the untrusted-project policy (unless-trusted), Codex runs commands it
+# considers known-safe reads, such as cat, grep or ls, without asking. An
+# injected message could use that to pull a file such as .env into the
+# conversation. Sending it anywhere still needs a prompted Postern reply,
+# but the file should not be read without the human in the first place.
+# These rules make those reads ask.
+#
+# Check a command against this file with:
+#   codex execpolicy check --rules ~/.codex/rules/postern.rules cat .env
+# which must report "decision":"prompt".
+
+# Reads and searches Codex would otherwise run without asking.
+prefix_rule(
+    pattern = [["cat", "head", "tail", "less", "more", "grep", "rg", "find", "ls", "sed", "awk"]],
+    decision = "prompt",
+    justification = "Postern: this session may hold untrusted messages; reading files needs the human's approval",
+    match = [
+        ["cat", ".env"],
+        ["head", "-n", "5", "id_ed25519"],
+        ["grep", "-r", "SECRET", "."],
+        ["rg", "TOKEN"],
+        ["find", ".", "-name", "*.pem"],
+        ["ls", "-la"],
+        ["sed", "-n", "1,20p", ".env"],
+        ["awk", "{print}", ".env"],
+    ],
+    not_match = [["make", "test"]],
+)
+
+# Other commands that print file contents or history.
+prefix_rule(
+    pattern = [["nl", "wc", "cut", "sort", "uniq", "tr", "rev", "tac", "base64", "od", "xxd", "strings", "stat", "file", "diff", "cmp"]],
+    decision = "prompt",
+    justification = "Postern: this session may hold untrusted messages; reading files needs the human's approval",
+    match = [["base64", ".env"], ["nl", ".env"]],
+)
+
+prefix_rule(
+    pattern = ["git", ["show", "log", "diff", "grep", "blame", "cat-file"]],
+    decision = "prompt",
+    justification = "Postern: this session may hold untrusted messages; reading history needs the human's approval",
+    match = [["git", "log", "-p"], ["git", "show", "HEAD:.env"]],
+    not_match = [["git", "status"]],
+)

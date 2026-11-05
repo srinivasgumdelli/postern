@@ -9,6 +9,7 @@ import (
 	"io/fs"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"unicode"
 )
@@ -181,7 +182,9 @@ func wantGroup(event, binaryPath, serverName string) hookGroup {
 		return hookGroup{Matcher: "*", Hooks: []hookHandler{{
 			Type: "command", Command: HookCommand(binaryPath, EventPreToolUse, serverName), OnFailure: "block"}}}
 	case "PostToolUse":
-		return hookGroup{Matcher: "mcp__" + serverName + "__check_inbox", Hooks: []hookHandler{{
+		// Every tool: any tool's output can carry Postern content, for
+		// example a shell that ran the binary directly.
+		return hookGroup{Matcher: "*", Hooks: []hookHandler{{
 			Type: "command", Command: HookCommand(binaryPath, EventPostToolUse, serverName)}}}
 	case "UserPromptSubmit":
 		return hookGroup{Hooks: []hookHandler{{
@@ -223,18 +226,24 @@ func mergeSettings(existing []byte, binaryPath, serverName string) ([]byte, bool
 				return nil, false, fmt.Errorf(`"hooks.%s" is not a JSON array: %w`, event, err)
 			}
 		}
+		upgraded := false
+		if event == "PostToolUse" {
+			groups, upgraded = dropLegacyPostGroup(groups, want.Hooks[0].Command, serverName)
+		}
 		present, err := findHook(event, groups, want)
 		if err != nil {
 			return nil, false, err
 		}
-		if present {
+		if present && !upgraded {
 			continue
 		}
-		raw, err := marshalNoEscape(want)
-		if err != nil {
-			return nil, false, err
+		if !present {
+			raw, err := marshalNoEscape(want)
+			if err != nil {
+				return nil, false, err
+			}
+			groups = append(groups, raw)
 		}
-		groups = append(groups, raw)
 		arr, err := marshalNoEscape(groups)
 		if err != nil {
 			return nil, false, err
@@ -280,7 +289,7 @@ func findHook(event string, groups []json.RawMessage, want hookGroup) (bool, err
 			if h.Command != cmd {
 				continue
 			}
-			if h.If != "" || h.Async || h.AsyncRewake || !matcherCovers(event, group.Matcher, want.Matcher) {
+			if h.If != "" || h.Async || h.AsyncRewake || !matcherCovers(event, group.Matcher) {
 				return false, fmt.Errorf("hooks.%s already has the Postern guard command but narrowed "+
 					"(matcher, \"if\" or async); remove that entry and run the install again", event)
 			}
@@ -290,16 +299,41 @@ func findHook(event string, groups []json.RawMessage, want hookGroup) (bool, err
 	return false, nil
 }
 
-func matcherCovers(event string, have *string, want string) bool {
+func matcherCovers(event string, have *string) bool {
 	all := have == nil || *have == "" || *have == "*"
 	switch event {
 	case "UserPromptSubmit":
 		return true // no matcher support; any value is ignored
-	case "PostToolUse":
-		return all || *have == want
-	default: // PreToolUse and SessionStart must see every call / source
+	default: // PreToolUse, PostToolUse and SessionStart must see every call / source
 		return all
 	}
+}
+
+// dropLegacyPostGroup removes the PostToolUse group that earlier versions of
+// the installer wrote (matching only check_inbox), so that installing again
+// upgrades it to the match-all group. Only a group with exactly that shape
+// is removed; one edited by hand is left for findHook to refuse.
+func dropLegacyPostGroup(groups []json.RawMessage, cmd, serverName string) ([]json.RawMessage, bool) {
+	legacy, err := json.Marshal(hookGroup{Matcher: "mcp__" + serverName + "__check_inbox",
+		Hooks: []hookHandler{{Type: "command", Command: cmd}}})
+	if err != nil {
+		return groups, false
+	}
+	var want any
+	if json.Unmarshal(legacy, &want) != nil {
+		return groups, false
+	}
+	kept := make([]json.RawMessage, 0, len(groups))
+	dropped := false
+	for _, g := range groups {
+		var have any
+		if json.Unmarshal(g, &have) == nil && reflect.DeepEqual(have, want) {
+			dropped = true
+			continue
+		}
+		kept = append(kept, g)
+	}
+	return kept, dropped
 }
 
 func marshalNoEscape(v any) ([]byte, error) {
