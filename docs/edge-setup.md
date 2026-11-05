@@ -179,7 +179,7 @@ cfapi "https://api.cloudflare.com/client/v4/zones/<ZONE_ID>/client_certificates"
 }
 ```
 
-- `edge_secret_file` is the path inside the container; leave it as is. It is required in header mode and ignored in `mtls` mode.
+- `edge_secret_file` is the path inside the container; leave it as is. It is required in header mode and ignored in `mtls` mode. `edge_secret_next_file` is set only during an [edge secret rotation](#edge-secret-rotation).
 - Fingerprints are 64 hex characters. Case, colons and spaces are normalized. A fingerprint may belong to only one peer.
 - During rotation a peer lists two fingerprints (old and new); remove the old one once the bridge has switched.
 - Every peer needs at least one fingerprint, and the file needs at least two peers; otherwise the relay refuses to start. To cut a peer off before its replacement certificate exists, replace its fingerprint with one that matches no certificate (`openssl rand -hex 32`) rather than leaving the list empty.
@@ -237,26 +237,54 @@ Then run the verification checklist below.
 
 ## Edge secret rotation
 
-Rotate the edge secret when someone who could read it (the file, or the transform rule) no longer should, when you suspect it leaked, when the relay host or edge account may be compromised, and whenever you rotate the tunnel credentials. The relay accepts one secret at a time, so requests between steps 2 and 3 get 401; bridges retry with backoff, so keep the gap short.
+Rotate the edge secret when someone who could read it (the file, or the transform rule) no longer should, when you suspect it leaked, when the relay host or edge account may be compromised, and whenever you rotate the tunnel credentials.
 
-1. On the relay host, generate the new value next to the old one:
+The relay accepts a second, *next* secret alongside the current one (`edge_secret_next_file`), so there is no window in which the edge sends a secret the relay does not know. A request passes if its secret matches either; both are compared in constant time, and the access log names the slot that matched only as `"edge_secret_slot":"current"` or `"next"`. The two relay restarts below take a few seconds each, and bridges retry with backoff. Order matters: change the transform rule only after the relay has loaded the next secret (step 2), and drop the old one only after the edge sends the new one (step 3).
+
+1. **Generate the next secret** on the relay host, next to the current one. It never appears on the terminal, in argv or in shell history:
 
    ```sh
-   (umask 077 && openssl rand -hex 32 > deploy/secrets/edge-secret.new)
+   (umask 077 && openssl rand -hex 32 > deploy/secrets/edge-secret-next)
+   chmod 0400 deploy/secrets/edge-secret-next
    ```
 
-2. Edit the transform rule (step 8): replace the static `X-Postern-Edge-Secret` value with the content of `edge-secret.new`, and deploy the rule.
-3. Immediately swap the file and recreate the relay. The secret is a bind mount, and replacing the file creates a new inode, so recreate the container rather than restarting it:
+   On a Linux host the relay (`65532:65532`) must be able to read it: `sudo chown 65532:65532 deploy/secrets/edge-secret-next`. Then step 3 needs `sudo cat` to copy it.
+
+2. **Restart the relay with both secrets.** Add this line to `deploy/relay.json`, next to `edge_secret_file`:
+
+   ```json
+   "edge_secret_next_file": "/run/secrets/edge_secret_next",
+   ```
+
+   and recreate the relay with the rotation overlay, which mounts the file as a second compose secret (the relay only; `cloudflared` never gets it):
 
    ```sh
-   mv deploy/secrets/edge-secret.new deploy/secrets/edge-secret
-   chmod 0400 deploy/secrets/edge-secret
-   sudo chown 65532:65532 deploy/secrets/edge-secret     # Linux host
+   docker compose -f docker-compose.yml -f deploy/compose.edge-secret-next.yml up -d --force-recreate relay
+   docker compose logs relay | grep 'relay listening'      # "edge_secrets":2
+   ```
+
+   The next file gets the same checks as the current one (at least 32 bytes, printable, not a placeholder, at most 4 KB), and must differ from it; otherwise the relay refuses to start and says which file is wrong, never its content. Requests still carry the current secret: their access log lines show `"edge_secret_slot":"current"`.
+
+3. **Switch the edge.** Edit the transform rule (step 8): replace the static `X-Postern-Edge-Secret` value with the content of `edge-secret-next` (`pbcopy < deploy/secrets/edge-secret-next` on macOS, `sudo cat deploy/secrets/edge-secret-next | xclip -selection clipboard` on Linux), deploy the rule, and clear the clipboard. Then wait until requests arrive with the next secret only. Bridges poll at least every 25 seconds, so a couple of minutes is plenty:
+
+   ```sh
+   docker compose logs --since 2m relay | grep -c '"edge_secret_slot":"current"'   # 0 once the edge has switched
+   docker compose logs --since 2m relay | grep -c '"edge_secret_slot":"next"'      # more than 0
+   ```
+
+4. **Promote the next secret and drop the old one.** Move the new value into the current file, remove the `edge_secret_next_file` line from `deploy/relay.json`, and recreate the relay **without** the overlay. Replacing the file creates a new inode, so recreate the container rather than restarting it:
+
+   ```sh
+   mv deploy/secrets/edge-secret-next deploy/secrets/edge-secret     # sudo mv if the files are owned by 65532
    docker compose up -d --force-recreate relay
+   docker compose logs relay | grep 'relay listening'      # "edge_secrets":1
    ```
 
-   (Use `sudo mv` if the old file is owned by `65532`.)
-4. Check: `postern edge-check` passes on each bridge, verification item 8 below still gets 401, and `docker compose logs relay` shows no `edge secret rejected` events after the restart.
+   `mv` keeps the next file's mode (0400) and owner. If the relay does not start, `docker compose logs relay` says why; a `cannot open edge_secret_next_file` means the line is still in `relay.json`.
+
+5. **Check:** the access log shows `"edge_secret_slot":"current"` again, `postern edge-check` passes on each bridge, verification item 8 below still gets 401, and `docker compose logs relay` shows no `edge secret rejected` events after the restart.
+
+To abandon a rotation before step 4, put the old value back in the transform rule (if you changed it), remove the `edge_secret_next_file` line, recreate the relay without the overlay, and delete `deploy/secrets/edge-secret-next`. The current secret works throughout.
 
 ## Verification checklist
 
@@ -337,4 +365,4 @@ An edge rejection is Cloudflare's HTML block page. A relay rejection is JSON lik
 
 9. **Real bridges work end to end.** On each machine, `postern edge-check` succeeds. It goes through the edge, which adds the edge secret, so it needs no access to the secret.
 
-10. **Logs carry no content or secrets.** `docker compose logs relay` shows method, route, status, bytes, duration and peer only. No query strings, no bodies, no client addresses, no header values. Item 8 adds `edge secret rejected` events with a `reason` (`missing`, `mismatch` or `multiple`) and nothing else.
+10. **Logs carry no content or secrets.** `docker compose logs relay` shows method, route, status, bytes, duration and peer only, plus `edge_secret_slot` (`current`, or `next` during a rotation) on requests that carried a valid edge secret. No query strings, no bodies, no client addresses, no header values. Item 8 adds `edge secret rejected` events with a `reason` (`missing`, `mismatch` or `multiple`) and nothing else.

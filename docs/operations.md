@@ -109,7 +109,7 @@ Record the date and outcome. Repeat after any change to the edge rules.
 | A Touch ID or password dialog for `postern` appears that you did not expect | Something tried to change what the bridge trusts. Cancel it, then find out what ran it. |
 | Thread circuit breaker tripped | Read the thread first. If the loop is understood, `postern thread reset <thread>`. |
 | Relay host or edge account compromised | Content stays sealed. Rotate the edge API token, tunnel credentials and edge secret ([edge-setup.md](edge-setup.md#edge-secret-rotation)), redeploy the relay, rotate client certificates. |
-| Relay logs show `edge secret rejected` | Something reached the relay without going through the edge (or the transform rule's secret is out of date). The `reason` says whether the header was missing, wrong or repeated. Find what on the relay host or internal network sent it; if the rule was just changed, re-check it against `deploy/secrets/edge-secret`. |
+| Relay logs show `edge secret rejected` | Something reached the relay without going through the edge (or the transform rule's secret is out of date). The `reason` says whether the header was missing, wrong or repeated. Find what on the relay host or internal network sent it; if the rule was just changed, re-check it against `deploy/secrets/edge-secret` (or `edge-secret-next` during a [rotation](edge-setup.md#edge-secret-rotation)). |
 
 ## Residual risks (v0)
 

@@ -307,6 +307,62 @@ func TestComposeRelayGetsEdgeSecret(t *testing.T) {
 	}
 }
 
+// TestComposeEdgeSecretNextOverlay: the rotation overlay adds only the
+// optional next edge secret, only to the relay, from the gitignored
+// secrets directory, at the path the docs tell the operator to put in
+// relay.json. The base compose file does not need the next file, so
+// normal operation works without it.
+func TestComposeEdgeSecretNextOverlay(t *testing.T) {
+	base := loadCompose(t)
+	if base.path("secrets", "edge_secret_next") != nil {
+		t.Fatal("docker-compose.yml must not require the next edge secret; it belongs in the overlay")
+	}
+	if _, ok := serviceSecrets(base, "relay")["edge_secret_next"]; ok {
+		t.Fatal("docker-compose.yml relay must not mount the next edge secret")
+	}
+
+	data, err := os.ReadFile(filepath.Join("..", "..", "deploy", "compose.edge-secret-next.yml"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	root := parseYAML(t, data)
+	walk(root, func(n *node) {
+		switch n.key {
+		case "ports", "expose", "networks", "network_mode", "ipc", "pid", "privileged", "devices",
+			"extra_hosts", "cap_add", "volumes", "image", "build", "command", "user", "read_only",
+			"security_opt", "cap_drop", "environment", "env_file":
+			t.Errorf("line %d: the overlay must not set %q", n.line, n.key)
+		}
+	})
+	if got := root.child("services").items(); !slices.Equal(got, []string{"relay"}) {
+		t.Fatalf("overlay services = %v, want only relay", got)
+	}
+	if got := root.path("services", "relay").items(); !slices.Equal(got, []string{"secrets"}) {
+		t.Fatalf("overlay relay keys = %v, want only secrets", got)
+	}
+	if got := serviceSecrets(root, "relay"); len(got) != 1 || got["edge_secret_next"] != "edge_secret_next" {
+		t.Fatalf("overlay relay secrets = %v, want only edge_secret_next", got)
+	}
+	if got := root.child("secrets").items(); !slices.Equal(got, []string{"edge_secret_next"}) {
+		t.Fatalf("overlay top-level secrets = %v", got)
+	}
+	f := root.path("secrets", "edge_secret_next", "file")
+	if f == nil || unquote(f.value) != "./deploy/secrets/edge-secret-next" {
+		t.Fatal("secrets.edge_secret_next.file must be ./deploy/secrets/edge-secret-next")
+	}
+
+	// The documented relay.json line names the overlay's mount point.
+	for _, doc := range []string{"docs/edge-setup.md", "deploy/compose.edge-secret-next.yml"} {
+		b, err := os.ReadFile(filepath.Join("..", "..", doc))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if !strings.Contains(string(b), `"edge_secret_next_file": "/run/secrets/edge_secret_next"`) {
+			t.Errorf("%s does not give the relay.json line for the next edge secret", doc)
+		}
+	}
+}
+
 func TestParseYAMLHelper(t *testing.T) {
 	root := parseYAML(t, []byte(`
 a:
