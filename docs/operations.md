@@ -81,9 +81,9 @@ Each bridge prunes its local inbox hourly: sent and received messages after 30 d
 Client certificates are short-lived (about 14 days) and rotate weekly.
 
 1. `postern cert csr --new-key` generates a new key, keeps it as the *next* key in the keychain (the current certificate keeps working), and prints a CSR.
-2. The operator issues a certificate for it.
-3. `postern cert import new.pem` sees that the certificate matches the next key, asks you to approve the switch (Touch ID or password), promotes it, and prints the new fingerprint.
-4. The operator adds the new fingerprint next to the old one in `relay.json` (both are accepted during the overlap) and restarts the relay.
+2. The operator issues a certificate for it and notes its SHA-256 fingerprint ([edge-setup.md](edge-setup.md) step 5).
+3. The operator adds the new fingerprint next to the old one in `relay.json` (both are accepted during the overlap) and restarts the relay. In Worker mode: add it to `PEERS` and redeploy ([relay-modes.md](relay-modes.md#rotation)). Do this before the import, so the bridge is never presenting a certificate the relay does not know.
+4. `postern cert import new.pem` sees that the certificate matches the next key, asks you to approve the switch (Touch ID or password), promotes it, and prints the new fingerprint. Check that it matches the one the operator added.
 5. Once `postern edge-check` passes with the new certificate, the operator removes the old fingerprint and revokes the old certificate at the edge.
 
 ## Revocation drill (before the first real peer connects)
