@@ -6,7 +6,6 @@ import (
 	"crypto/rand"
 	"crypto/tls"
 	"encoding/json"
-	"errors"
 	"fmt"
 	"io"
 	"log"
@@ -83,15 +82,25 @@ func TestMain(m *testing.M) {
 // containing secretMarker and names the rule and line, never the match.
 func testScanner(subject, body string) error {
 	if strings.Contains(subject, secretMarker) {
-		return errors.New("test-secret rule matched in subject")
+		return &testFinding{line: 0, msg: "test-secret rule matched in subject"}
 	}
 	for i, line := range strings.Split(body, "\n") {
 		if strings.Contains(line, secretMarker) {
-			return fmt.Errorf("test-secret rule matched on body line %d", i+1)
+			return &testFinding{line: i + 1, msg: fmt.Sprintf("test-secret rule matched on body line %d", i+1)}
 		}
 	}
 	return nil
 }
+
+// testFinding is the test scanner's error; like scan.Finding it can name
+// its rule and line for the audit log.
+type testFinding struct {
+	line int
+	msg  string
+}
+
+func (f *testFinding) Error() string           { return f.msg }
+func (f *testFinding) RuleLine() (string, int) { return "test-secret", f.line }
 
 // testClock runs in real time plus a manual offset, so tests can jump
 // ahead while timers and long polls still behave.

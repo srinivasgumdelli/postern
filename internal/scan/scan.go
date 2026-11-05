@@ -53,6 +53,9 @@ func (f *Finding) Error() string {
 		"; remove it before sending (Postern blocks messages that look like secrets)"
 }
 
+// RuleLine returns the rule name and line, for the audit log.
+func (f *Finding) RuleLine() (string, int) { return f.Rule, f.Line }
+
 // Check scans the subject (reported as line 0) and then each body line.
 // It returns nil or a *Finding for the first match.
 func Check(subject, body string) error {

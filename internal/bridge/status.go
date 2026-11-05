@@ -3,6 +3,8 @@ package bridge
 import (
 	"net/http"
 	"time"
+
+	"postern/internal/audit"
 )
 
 // Values returned by RelayStatus.
@@ -45,40 +47,62 @@ func isAuthStatus(status int) bool {
 // noteRelay records the outcome of one relay exchange (status 0 with a
 // non-nil err means no response). On 401/403 it may reload the client
 // certificate.
+//
+// Changes of state are audited once each: relay_auth_failed on the first
+// 401/403, relay_unreachable once polls have failed for unreachableAfter,
+// and relay_recovered on the next normal answer after either.
 func (b *Bridge) noteRelay(status int, err error, isPoll bool) {
-	if err != nil && status == 0 {
-		if isPoll {
-			b.statusMu.Lock()
-			if b.pollFailSince.IsZero() {
-				b.pollFailSince = b.now()
-			}
-			b.statusMu.Unlock()
+	var ev *audit.Event
+	defer func() {
+		if ev != nil {
+			b.audit(*ev)
 		}
-		return
-	}
+	}()
+	failing := (err != nil && status == 0) || status >= 500
 	switch {
-	case status >= 500:
-		if isPoll {
-			b.statusMu.Lock()
-			if b.pollFailSince.IsZero() {
-				b.pollFailSince = b.now()
-			}
-			b.statusMu.Unlock()
+	case failing:
+		if !isPoll {
+			return
 		}
+		b.statusMu.Lock()
+		now := b.now()
+		if b.pollFailSince.IsZero() {
+			b.pollFailSince = now
+		}
+		if !b.unreachable && now.Sub(b.pollFailSince) > unreachableAfter {
+			b.unreachable = true
+			ev = &audit.Event{Event: audit.EventRelayUnreachable, Status: status, Reason: unreachableReason(status, err)}
+		}
+		b.statusMu.Unlock()
 	case isAuthStatus(status):
 		b.statusMu.Lock()
+		if !b.authFailed {
+			ev = &audit.Event{Event: audit.EventRelayAuthFailed, Status: status}
+		}
 		b.authFailed = true
 		b.pollFailSince = time.Time{}
+		b.unreachable = false
 		b.statusMu.Unlock()
 		b.maybeReloadCert()
 	default:
 		// Any other answer means the relay is reachable and accepted the
 		// certificate.
 		b.statusMu.Lock()
+		if b.authFailed || b.unreachable {
+			ev = &audit.Event{Event: audit.EventRelayRecovered, Status: status}
+		}
 		b.authFailed = false
 		b.pollFailSince = time.Time{}
+		b.unreachable = false
 		b.statusMu.Unlock()
 	}
+}
+
+func unreachableReason(status int, err error) string {
+	if err != nil {
+		return netReason(err)
+	}
+	return "status"
 }
 
 // maybeReloadCert calls ReloadClientCert (at most once per reloadEvery)

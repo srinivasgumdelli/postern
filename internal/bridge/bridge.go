@@ -30,12 +30,14 @@ import (
 	"log/slog"
 	"os"
 	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
 	"unicode"
 	"unicode/utf8"
 
+	"postern/internal/audit"
 	"postern/internal/envelope"
 	"postern/internal/ulid"
 )
@@ -78,6 +80,18 @@ const (
 	recordTimeout = 15 * time.Second
 )
 
+// Auditor records metadata-only audit events (see internal/audit; an
+// *audit.Log satisfies it). The bridge fills Actor and never passes
+// subjects, bodies, keys, certificates, paths or the sending session of
+// an inbound message. A Record error is logged and otherwise ignored: the
+// audit log is evidence, so a full disk does not stop messaging.
+type Auditor interface {
+	Record(ctx context.Context, e audit.Event) error
+}
+
+// auditTimeout bounds one audit write (mostly the wait for the lock).
+const auditTimeout = 5 * time.Second
+
 // Options configure a Bridge.
 type Options struct {
 	// Scanner checks every outgoing subject and body before anything is
@@ -114,6 +128,11 @@ type Options struct {
 	// are kept in the local database. Zero means 30 days; otherwise it
 	// must be between 1 and 3650 days. See prune.go for the other rules.
 	MessageRetention time.Duration
+	// Audit receives one event per send, queue, delivery, rejection,
+	// block, limit, trip, receipt, drop and relay status change. nil means
+	// no audit; the postern CLI always sets it unless the config turns
+	// the audit log off.
+	Audit Auditor
 	// Logger receives metadata-only logs. nil discards.
 	Logger *slog.Logger
 	// Now is the clock. nil = time.Now.
@@ -182,6 +201,7 @@ type Bridge struct {
 	client    *relayClient
 	crypt     *inboxCrypto
 	reload    func() (tls.Certificate, error)
+	auditor   Auditor
 
 	onceMu     sync.Mutex
 	onceLogged map[string]struct{}
@@ -189,6 +209,7 @@ type Bridge struct {
 	statusMu      sync.Mutex
 	authFailed    bool
 	pollFailSince time.Time
+	unreachable   bool // relay_unreachable was recorded and not yet recovered
 	lastReload    time.Time
 
 	mu       sync.Mutex
@@ -312,6 +333,7 @@ func Open(opts Options) (*Bridge, error) {
 		client:    newRelayClient(base, opts.ClientCert, opts.RootCAs, pt),
 		crypt:     crypt,
 		reload:    opts.ReloadClientCert,
+		auditor:   opts.Audit,
 		kick:      make(chan struct{}, 1),
 
 		onceLogged: map[string]struct{}{},
@@ -391,6 +413,20 @@ func (b *Bridge) logOnce(key string) bool {
 	return true
 }
 
+// audit records e (with Actor set to the bridge). It never fails the
+// caller: errors are logged by event name only.
+func (b *Bridge) audit(e audit.Event) {
+	if b.auditor == nil {
+		return
+	}
+	e.Actor = audit.ActorBridge
+	ctx, cancel := context.WithTimeout(context.Background(), auditTimeout)
+	defer cancel()
+	if err := b.auditor.Record(ctx, e); err != nil {
+		b.log.Error("audit record failed", "event", e.Event, "err", err.Error())
+	}
+}
+
 // logUnreadable logs (once per id) a stored row that does not decrypt.
 func (b *Bridge) logUnreadable(id string) {
 	if b.logOnce("unreadable:" + id) {
@@ -407,7 +443,7 @@ func (b *Bridge) Send(ctx context.Context, session string, req SendRequest) (Sen
 	if _, ok := b.peers[req.To]; !ok {
 		return SendResult{}, b.unknownPeerErr()
 	}
-	if err := b.scan(req.Subject, req.Body); err != nil {
+	if err := b.scan(session, req.To, req.Thread, req.Subject, req.Body); err != nil {
 		return SendResult{}, err
 	}
 	thread := req.Thread
@@ -446,7 +482,7 @@ func (b *Bridge) Reply(ctx context.Context, session, thread, body string) (SendR
 		return SendResult{}, b.unknownPeerErr()
 	}
 	subject := replySubject(ti.firstSubject)
-	if err := b.scan(subject, body); err != nil {
+	if err := b.scan(session, ti.peer, thread, subject, body); err != nil {
 		return SendResult{}, err
 	}
 	if err := validateContent(subject, body); err != nil {
@@ -464,11 +500,28 @@ func (b *Bridge) unknownPeerErr() error {
 	return fmt.Errorf("%w: configured peers: %s", ErrUnknownPeer, strings.Join(b.peerNames, ", "))
 }
 
+// scanFinding is implemented by scanner errors that can name the rule and
+// line that matched (scan.Finding).
+type scanFinding interface {
+	RuleLine() (rule string, line int)
+}
+
 // scan runs the secret scanner. The scanner's error text names a rule and
 // a line, never the match, so it is passed to the agent; it is not logged.
-func (b *Bridge) scan(subject, body string) error {
+// The audit event records the rule and line only.
+func (b *Bridge) scan(session, peer, thread, subject, body string) error {
 	if err := b.scanner(subject, body); err != nil {
 		b.log.Warn("outgoing message blocked by scanner")
+		reason := "scanner"
+		var f scanFinding
+		if errors.As(err, &f) {
+			rule, line := f.RuleLine()
+			reason = "rule=" + rule + ",line=" + strconv.Itoa(line)
+		}
+		b.audit(audit.Event{
+			Event: audit.EventBlockedByScanner, Peer: peer, Session: session, Thread: thread,
+			SizeBytes: int64(len(body)), Reason: reason,
+		})
 		return fmt.Errorf("%w: %w", ErrBlocked, err)
 	}
 	return nil
@@ -494,7 +547,13 @@ func (b *Bridge) submit(ctx context.Context, o outgoing) (SendResult, error) {
 		}
 		return SendResult{}, fmt.Errorf("%w: message is not valid", ErrInvalid)
 	}
-	if err := b.insertOutbound(ctx, o, m, now); err != nil {
+	note, err := b.insertOutbound(ctx, o, m, now)
+	if note != nil {
+		// A trip or a rate limit, recorded once the transaction is over.
+		note.Peer, note.Session, note.Thread, note.SizeBytes = o.peer, o.session, o.thread, int64(len(o.body))
+		b.audit(*note)
+	}
+	if err != nil {
 		return SendResult{}, err
 	}
 	b.log.Info("outbound stored", "id", m.ID, "thread", m.Thread, "peer", m.To)
@@ -506,7 +565,7 @@ func (b *Bridge) submit(ctx context.Context, o outgoing) (SendResult, error) {
 	actx, cancel := context.WithTimeout(ctx, sendAttemptTimeout)
 	res := b.attempt(actx, r)
 	cancel()
-	b.record(ctx, r, res)
+	b.record(ctx, r, res, true)
 	switch res.outcome {
 	case outDelivered:
 		b.kickOutbox()
@@ -524,62 +583,67 @@ func (b *Bridge) submit(ctx context.Context, o outgoing) (SendResult, error) {
 // insertOutbound runs the breaker, thread cap, burst and rate checks and
 // inserts the pending row, all in one immediate transaction so that
 // concurrent processes cannot both pass a check that only one should.
-func (b *Bridge) insertOutbound(ctx context.Context, o outgoing, m envelope.Message, now time.Time) error {
+//
+// note is a trip or rate-limit event for the caller to audit (after the
+// transaction, so the audit lock is never taken while the database write
+// lock is held); the caller fills in peer, session, thread and size.
+func (b *Bridge) insertOutbound(ctx context.Context, o outgoing, m envelope.Message, now time.Time) (note *audit.Event, err error) {
 	tx, err := b.db.BeginTx(ctx, nil)
 	if err != nil {
-		return b.internal(ctx, "begin outbound", err)
+		return nil, b.internal(ctx, "begin outbound", err)
 	}
 	defer tx.Rollback()
 
 	th, found, err := getThread(ctx, tx, o.thread)
 	if err != nil {
-		return b.internal(ctx, "load thread", err)
+		return nil, b.internal(ctx, "load thread", err)
 	}
 	if found {
 		if th.peer != o.peer {
-			return fmt.Errorf("%w: that thread belongs to another peer", ErrInvalid)
+			return nil, fmt.Errorf("%w: that thread belongs to another peer", ErrInvalid)
 		}
 		if th.tripped {
-			return trippedErr(o.thread, th.tripReason)
+			return nil, trippedErr(o.thread, th.tripReason)
 		}
 		reason, err := threadLimitReason(ctx, tx, b.limits, o.thread, th.resetSeq, th.pruned, now)
 		if err != nil {
-			return b.internal(ctx, "thread limits", err)
+			return nil, b.internal(ctx, "thread limits", err)
 		}
 		if reason != "" {
 			if err := tripThread(ctx, tx, o.thread, reason, now); err != nil {
-				return b.internal(ctx, "trip thread", err)
+				return nil, b.internal(ctx, "trip thread", err)
 			}
 			if err := tx.Commit(); err != nil {
-				return b.internal(ctx, "commit trip", err)
+				return nil, b.internal(ctx, "commit trip", err)
 			}
 			b.log.Warn("thread breaker tripped", "thread", o.thread, "peer", o.peer, "reason", reason)
-			return trippedErr(o.thread, reason)
+			return &audit.Event{Event: audit.EventThreadTripped, Reason: reason}, trippedErr(o.thread, reason)
 		}
 	}
 	tag := b.crypt.sessionTag(o.session)
 	scope, err := rateLimitScope(ctx, tx, b.limits, tag, now)
 	if err != nil {
-		return b.internal(ctx, "rate limits", err)
+		return nil, b.internal(ctx, "rate limits", err)
 	}
 	switch scope {
 	case "session":
 		b.log.Warn("outbound rate limited", "scope", scope)
-		return fmt.Errorf("%w: this session may send %d messages per hour; try again later", ErrRateLimited, b.limits.SessionPerHour)
+		return &audit.Event{Event: audit.EventRateLimited, Reason: scope},
+			fmt.Errorf("%w: this session may send %d messages per hour; try again later", ErrRateLimited, b.limits.SessionPerHour)
 	case "global":
 		b.log.Warn("outbound rate limited", "scope", scope)
-		return fmt.Errorf("%w: this machine may send %d messages per hour; try again later", ErrRateLimited, b.limits.GlobalPerHour)
+		return &audit.Event{Event: audit.EventRateLimited, Reason: scope}, fmt.Errorf("%w: this machine may send %d messages per hour; try again later", ErrRateLimited, b.limits.GlobalPerHour)
 	}
 	if !found {
 		if _, err := tx.ExecContext(ctx,
 			`INSERT INTO threads (thread, peer, created_at) VALUES (?, ?, ?)`,
 			o.thread, o.peer, now.UnixMilli()); err != nil {
-			return b.internal(ctx, "insert thread", err)
+			return nil, b.internal(ctx, "insert thread", err)
 		}
 	}
 	sealed, err := b.crypt.seal(m.ID, o.session, o.subject, o.body)
 	if err != nil {
-		return b.internal(ctx, "seal outbound", err)
+		return nil, b.internal(ctx, "seal outbound", err)
 	}
 	if _, err := tx.ExecContext(ctx, `
 		INSERT INTO messages (id, direction, peer, session_tag, thread, sealed, reply_to,
@@ -587,12 +651,12 @@ func (b *Bridge) insertOutbound(ctx context.Context, o outgoing, m envelope.Mess
 		VALUES (?, 'out', ?, ?, ?, ?, ?, ?, ?, 'pending', 0, ?, ?)`,
 		m.ID, o.peer, tag, o.thread, sealed, nullable(o.replyTo),
 		now.UnixMilli(), m.TS, now.UnixMilli(), now.Add(leaseDuration).UnixMilli()); err != nil {
-		return b.internal(ctx, "insert outbound", err)
+		return nil, b.internal(ctx, "insert outbound", err)
 	}
 	if err := tx.Commit(); err != nil {
-		return b.internal(ctx, "commit outbound", err)
+		return nil, b.internal(ctx, "commit outbound", err)
 	}
-	return nil
+	return nil, nil
 }
 
 func trippedErr(thread, reason string) error {
