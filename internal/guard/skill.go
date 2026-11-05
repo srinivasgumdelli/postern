@@ -15,6 +15,14 @@ import (
 //go:embed skill/SKILL.md
 var SkillFile string
 
+// previousSkills lists the SHA-256 of every earlier SKILL.md that postern
+// shipped, so an install over an untouched older copy upgrades it instead
+// of refusing. Add the current hash here whenever skill/SKILL.md changes;
+// TestPreviousSkillsCoverHistory fails until you do.
+var previousSkills = []string{
+	"2429e110f45cfbfb8343ff9730ad356e13a8950a08eda2aa8833efb013b7e133",
+}
+
 // InstallSkill writes skillsDir/postern/SKILL.md. Like the clear
 // command, an existing file with different content is left alone and
 // reported, so local edits are never overwritten silently.
@@ -23,7 +31,7 @@ func InstallSkill(skillsDir string) (string, error) {
 		return "", fmt.Errorf("guard: skills directory %q must be absolute", skillsDir)
 	}
 	path := filepath.Join(skillsDir, "postern", "SKILL.md")
-	need, err := fileNeeded(path, SkillFile)
+	need, err := fileNeeded(path, SkillFile, previousSkills...)
 	if err != nil || !need {
 		return path, err
 	}

@@ -1,8 +1,11 @@
 package guard
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 )
@@ -71,5 +74,50 @@ func TestDefaultCodexSkillsDir(t *testing.T) {
 	d, err := DefaultCodexSkillsDir()
 	if err != nil || !strings.HasSuffix(d, filepath.Join(".codex", "skills")) {
 		t.Fatalf("got %q %v", d, err)
+	}
+}
+
+// currentSkill is the SHA-256 of skill/SKILL.md. When the skill changes,
+// move this value into previousSkills (so older installs upgrade) and
+// put the new hash here.
+const currentSkill = "7ae23ec824cd9551b22db12e6b11676313ed8dd9f54acf2761546af599cbc72d"
+
+func TestPreviousSkillsCoverHistory(t *testing.T) {
+	sum := sha256.Sum256([]byte(SkillFile))
+	if got := hex.EncodeToString(sum[:]); got != currentSkill {
+		t.Fatalf("SKILL.md changed (sha256 %s): add %s to previousSkills and set currentSkill to the new hash", got, currentSkill)
+	}
+	if slices.Contains(previousSkills, currentSkill) {
+		t.Fatal("the current skill is listed as a previous version")
+	}
+}
+
+func TestInstallUpgradesUntouchedOlderSkill(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "postern", "SKILL.md")
+	old := "---\nname: postern\n---\nan older shipped skill\n"
+	os.MkdirAll(filepath.Dir(path), 0o755)
+	os.WriteFile(path, []byte(old), 0o644)
+	sum := sha256.Sum256([]byte(old))
+	saved := previousSkills
+	previousSkills = append(slices.Clone(saved), hex.EncodeToString(sum[:]))
+	defer func() { previousSkills = saved }()
+
+	if _, err := InstallSkill(dir); err != nil {
+		t.Fatal(err)
+	}
+	if b, _ := os.ReadFile(path); string(b) != SkillFile {
+		t.Fatal("older shipped skill was not upgraded")
+	}
+	// The Claude installer upgrades it too.
+	proj := t.TempDir()
+	skill := filepath.Join(proj, ".claude", "skills", "postern", "SKILL.md")
+	os.MkdirAll(filepath.Dir(skill), 0o755)
+	os.WriteFile(skill, []byte(old), 0o644)
+	if err := InstallClaudeCode(proj, "/usr/local/bin/postern", "postern"); err != nil {
+		t.Fatal(err)
+	}
+	if b, _ := os.ReadFile(skill); string(b) != SkillFile {
+		t.Fatal("Claude installer did not upgrade the older skill")
 	}
 }
