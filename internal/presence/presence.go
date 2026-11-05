@@ -40,10 +40,11 @@ var (
 // MaxReasonBytes bounds the reason shown in the system dialog.
 const MaxReasonBytes = 120
 
-// Confirm shows the system's user-presence dialog with reason (a short
-// phrase such as "trust peer peer-b"; macOS renders it as "<program> is
-// trying to <reason>.") and blocks until the human approves, refuses,
-// or the dialog times out. It returns nil only on approval.
+// Confirm shows the system's user-presence dialog with reason, a short
+// phrase such as "trust peer peer-b" that macOS shows in a sentence of
+// the form "... is trying to <reason>.", and blocks until the human
+// approves, refuses, or the dialog times out (two minutes). It returns
+// nil only on approval.
 func Confirm(reason string) error {
 	r, err := cleanReason(reason)
 	if err != nil {
