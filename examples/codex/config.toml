@@ -21,6 +21,12 @@
 #     --dangerously-bypass-approvals-and-sandbox or --approve-for-me.
 #   * Approvals go to the human (approvals_reviewer = "user"), never to an
 #     automatic reviewer model.
+#   * unless-trusted still runs commands Codex considers known-safe reads
+#     (cat, grep, ls, sed -n and the like) without asking, so an injected
+#     message could get a file such as .env read into the conversation.
+#     Sending it out still needs a prompted reply, but install the
+#     exec-policy rules in examples/codex/rules/postern.rules as
+#     ~/.codex/rules/postern.rules to make those reads ask too.
 #
 # Check what a session actually got with /status, or before starting it with
 #   codex debug prompt-input | grep -o 'approval_policy[^.]*'
@@ -28,7 +34,12 @@
 #
 # See docs/session-guard.md for what this does and does not cover.
 
-sandbox_mode = "workspace-write" # "read-only" is stricter still
+# read-only: no file edit, write or network use happens without the human
+# approving it. Recommended for any session that receives Postern messages.
+# It does not stop reads (the rules file above does that). With
+# "workspace-write", some Codex releases apply edits inside the workspace
+# without asking.
+sandbox_mode = "read-only"
 approvals_reviewer = "user"
 web_search = "disabled"          # hosted search runs without per-call approval
 
