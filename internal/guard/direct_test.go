@@ -36,6 +36,10 @@ var notDirectRuns = []string{
 	"postern version",
 	"/usr/local/bin/postern show --config /tmp/c",
 	"postern guard install --project .",
+	"postern wait --session review",
+	"/usr/local/bin/postern wait --session review --timeout 30m",
+	"bridge wait --session review", // the configured binary's basename
+	"until postern wait --session review --timeout 10m; do :; done",
 	"ls -l /usr/local/bin/postern",
 	"grep -rn mcp internal/",
 	"git log --oneline -- internal/mcpserver",
@@ -109,6 +113,27 @@ func TestDirectPosternRunAsksEvenWhenUntainted(t *testing.T) {
 	if r := runHook(t, opts, EventPreToolUse, preInput("clean", "Write", "default",
 		map[string]any{"file_path": "/path/to/run.sh", "content": "postern mcp --session x"})); !r.noDecision() {
 		t.Errorf("Write with postern mcp in its content: want no decision, got %+v", r)
+	}
+}
+
+// `postern wait` is the supported way to watch for messages from a shell
+// (a Claude Code background task). It prints a count and peer names only,
+// so the direct-run check leaves it alone, and its output does not taint.
+func TestPosternWaitIsNotADirectRun(t *testing.T) {
+	opts := testOptions(t)
+	opts.BinaryPath = "/opt/tools/bridge"
+	cmd := map[string]any{"command": "/opt/tools/bridge wait --session review --timeout 30m", "run_in_background": true}
+	for _, mode := range []string{"default", "bypassPermissions"} {
+		if r := runHook(t, opts, EventPreToolUse, preInput("clean", "Bash", mode, cmd)); !r.noDecision() {
+			t.Errorf("mode %q: want no decision for postern wait, got %+v", mode, r)
+		}
+	}
+	resp := map[string]any{"stdout": "2 new Postern messages from peer-b. Read them with check_inbox.\n", "stderr": "", "interrupted": false}
+	if r := runHook(t, opts, EventPostToolUse, postInput("clean", "Bash", resp)); r.code != 0 || len(r.out) != 0 {
+		t.Fatalf("post hook on wait output: %+v", r)
+	}
+	if _, ok := readMarker(t, opts, "clean"); ok {
+		t.Fatal("postern wait's output tainted the session")
 	}
 }
 

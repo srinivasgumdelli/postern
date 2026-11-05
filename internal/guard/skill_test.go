@@ -80,7 +80,7 @@ func TestDefaultCodexSkillsDir(t *testing.T) {
 // currentSkill is the SHA-256 of skill/SKILL.md. When the skill changes,
 // move this value into previousSkills (so older installs upgrade) and
 // put the new hash here.
-const currentSkill = "7ae23ec824cd9551b22db12e6b11676313ed8dd9f54acf2761546af599cbc72d"
+const currentSkill = "20cd0dee00d48d5b528d69c6eea491b4b1997ace0eb0ee5b316c8183d788a576"
 
 func TestPreviousSkillsCoverHistory(t *testing.T) {
 	sum := sha256.Sum256([]byte(SkillFile))

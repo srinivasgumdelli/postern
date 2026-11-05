@@ -21,6 +21,7 @@ var SkillFile string
 // TestPreviousSkillsCoverHistory fails until you do.
 var previousSkills = []string{
 	"2429e110f45cfbfb8343ff9730ad356e13a8950a08eda2aa8833efb013b7e133",
+	"7ae23ec824cd9551b22db12e6b11676313ed8dd9f54acf2761546af599cbc72d",
 }
 
 // InstallSkill writes skillsDir/postern/SKILL.md. Like the clear

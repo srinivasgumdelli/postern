@@ -411,6 +411,26 @@ A smoke test. Each human approves every prompt only after reading it.
 
 For a full walkthrough with real handoffs, see [example.md](example.md).
 
+### Getting told when a message arrives
+
+Postern does not push messages into a session. `postern wait --session NAME` blocks until a new unread message for that session is in the inbox, prints only a count and the peer name (`1 new Postern message from peer-a. Read it with check_inbox.`) and exits 0. With `--timeout 30m` it exits 3 when nothing arrived in time; on errors it exits 1. It never prints subjects, bodies or the sender's session name, runs its own poller (no MCP server needed) and reports each message once per session. Details: [session-guard.md](session-guard.md#watching-for-new-messages).
+
+- **Claude Code:** ask the session to run `postern wait --session review` as a background task and check Postern when it finishes. Start a new watcher after each notification; once the session is tainted, that `Bash` call asks you first.
+- **Codex and other clients:** run it in a separate terminal in a loop that notifies you, and ask the session to check Postern when it fires:
+
+  ```sh
+  while :; do
+    postern wait --session review --timeout 1h
+    case $? in
+      0) osascript -e 'display notification "New Postern message" with title "Postern"' ;;
+      3) ;;
+      *) sleep 60 ;;
+    esac
+  done
+  ```
+
+- **Smoke test:** on machine B run `postern wait --session review --timeout 5m` in a terminal, send from machine A, and check that it prints one line naming `peer-a` and exits 0.
+
 ## 11. Before the first real peer
 
 Do these the same day, with both humans and the operator present.

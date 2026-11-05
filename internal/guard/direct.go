@@ -11,6 +11,11 @@ import (
 // through a shell: "mcp" serves the tools (run directly, it hands inbox
 // content to the shell untagged and sends without the guard's prompts), and
 // "hook" is the guard itself (run directly, it can be fed fake events).
+//
+// "wait" is deliberately not here: it is the supported way to watch for
+// messages from a shell (a Claude Code background task), and it prints only
+// a count and peer names, never a subject, body or sender session, so no
+// untrusted text reaches the session through it.
 var guardedSubcommands = map[string]bool{"mcp": true, "hook": true}
 
 // shellCommand returns the command text of a shell-like tool call: the

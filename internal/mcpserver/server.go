@@ -102,7 +102,14 @@ func (h *handlers) relayStatus() (code, detail string) {
 			code, detail = "", ""
 		}
 	}()
-	code = sr.RelayStatus()
+	return DescribeRelayStatus(sr.RelayStatus())
+}
+
+// DescribeRelayStatus returns a relay status code made safe to show
+// ("unknown" if it is not a plain code) and the sentence that explains it,
+// or two empty strings for "" (healthy). check_inbox, send, reply and
+// `postern wait` all use it, so they say the same thing.
+func DescribeRelayStatus(code string) (safeCode, detail string) {
 	if code == "" {
 		return "", ""
 	}

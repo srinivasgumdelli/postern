@@ -424,6 +424,7 @@ func TestUsageMatchesConfigFlag(t *testing.T) {
 		{[]string{"edge-check"}, true},
 		{[]string{"thread", "reset"}, true},
 		{[]string{"mcp"}, true},
+		{[]string{"wait"}, true},
 		{[]string{"guard", "install"}, false},
 		{[]string{"guard", "install-codex"}, false},
 		{[]string{"hook", "pre-tool-use"}, false},
