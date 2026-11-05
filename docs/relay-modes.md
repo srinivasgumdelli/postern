@@ -129,7 +129,7 @@ As in [operations.md](operations.md#revocation-drill-before-the-first-real-peer-
 
 Bridges only need the relay's URL. If the hostname stays the same, nothing changes on the bridges. If it changes:
 
-1. Update `relay_url` in each bridge config and re-pin it (`postern config pin`, which asks for the terminal code).
+1. Update `relay_url` in each bridge config and re-pin it (`postern config pin`, which asks for Touch ID or your login password).
 2. Run `postern edge-check` on each machine.
 
 Messages are not migrated. Envelopes accepted by the old relay but not yet polled stay there, so let both inboxes drain (no sends, recipients poll) before switching. Seen ids are not migrated either; that is safe, because a replayed envelope is more than 10 minutes old within minutes of the switch, and posting it would still need the sender's client certificate.
