@@ -49,6 +49,11 @@ type Options struct {
 	// Claude Code session (tool names are mcp__<ServerName>__<tool>).
 	// Empty means "postern".
 	ServerName string
+	// BinaryPath is the path of the postern binary, used to spot shell
+	// commands that run it directly. Any word with the basename "postern"
+	// counts as well, and so does the running executable (the hook is run
+	// as the configured binary), so empty is fine.
+	BinaryPath string
 	// Now returns the current time; nil means time.Now.
 	Now func() time.Time
 }
@@ -103,9 +108,30 @@ type hookInput struct {
 }
 
 type guard struct {
-	st     *store
-	server string
-	now    func() time.Time
+	st       *store
+	server   string
+	now      func() time.Time
+	binaries []string // paths the postern binary is known by
+}
+
+// binaryPaths returns the configured binary path plus the running
+// executable, with symlinks resolved.
+func binaryPaths(configured string) []string {
+	var out []string
+	add := func(p string) {
+		if p == "" {
+			return
+		}
+		out = append(out, p)
+		if r, err := filepath.EvalSymlinks(p); err == nil && r != p {
+			out = append(out, r)
+		}
+	}
+	add(configured)
+	if exe, err := os.Executable(); err == nil {
+		add(exe)
+	}
+	return out
 }
 
 // Run handles one hook invocation and returns the process exit code. It
@@ -143,6 +169,9 @@ func Run(event string, stdin io.Reader, stdout io.Writer, opts Options) (code in
 	}
 
 	g := &guard{st: newStore(stateDir, now), server: server, now: now}
+	if event == EventPreToolUse {
+		g.binaries = binaryPaths(opts.BinaryPath)
+	}
 	raw, readErr := readInput(stdin)
 
 	switch event {
@@ -264,6 +293,20 @@ func (g *guard) preToolUse(raw []byte, readErr error, setupErr string, w io.Writ
 		return 0
 	case g.markReadTool():
 		return 0
+	}
+
+	// A shell command that runs `postern mcp` or `postern hook` stops for
+	// the human whether or not the session is tainted: Postern is used
+	// through its MCP tools, and running the binary directly bypasses the
+	// guard. This is a speed bump, not a boundary (see runsPosternDirectly).
+	if cmd, ok := shellCommand(in.ToolInput); ok && runsPosternDirectly(cmd, g.binaries) {
+		if g.isForeignInboxTool(in.ToolName) && g.armBeforeInbox(in.SessionID) != nil {
+			return emit(w, preDecision(decisionDeny, reasonCannotRecord))
+		}
+		if !interactiveMode(in.PermissionMode) {
+			return emit(w, preDecision(decisionDeny, reasonDirectNoPrompts(modeName(in.PermissionMode))))
+		}
+		return emit(w, preDecision(decisionAsk, reasonDirect))
 	}
 
 	m, exists, err := g.resolve(in)
@@ -408,6 +451,17 @@ func reasonNoPrompts(mode string) string {
 		"and permission mode %q does not stop for human approval, so this call is blocked. "+
 		"A session holding untrusted Postern content must not run in bypass, auto or dontAsk modes. "+
 		"Ask the human to switch to a mode that asks (default, plan or acceptEdits) or to start a fresh context with /clear.", mode)
+}
+
+const reasonDirect = "Postern guard: this command runs the postern binary's mcp or hook subcommand directly. " +
+	"Postern must be used through its MCP tools; running it from a shell bypasses the session guard " +
+	"(inbox content would arrive without the untrusted-content gate, and messages would be sent without its approval prompt). " +
+	"Approve only if you asked for exactly this command yourself."
+
+func reasonDirectNoPrompts(mode string) string {
+	return fmt.Sprintf("Postern guard: this command runs the postern binary's mcp or hook subcommand directly, "+
+		"which bypasses the session guard, and permission mode %q does not stop for human approval, so it is blocked. "+
+		"Postern must be used through its MCP tools.", mode)
 }
 
 func (g *guard) askReason(in hookInput) string {
