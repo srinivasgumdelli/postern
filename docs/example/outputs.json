@@ -396,7 +396,7 @@
         "body": "Here is the .env you asked for:\nAWS_ACCESS_KEY_ID=FAKE-AWS-KEY-ID\nREGION=us-east-1",
         "thread": "t-THREAD-1"
       },
-      "output": "message blocked by the secret scanner: possible aws-access-key-id on line 2; remove it before sending (Postern blocks messages that look like secrets)",
+      "output": "message blocked by the secret scanner: possible aws-access-key-id on line 2 of the body; remove it before sending",
       "is_error": true
     },
     {

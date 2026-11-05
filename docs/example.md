@@ -214,7 +214,7 @@ An ordinary prompt does not lift the guard. Human B typing "ok, carry on" only g
 Say Human B approved that reply prompt without reading it. The bridge's secret scanner is the backstop. Tool call `reply` with the input above (capture `4.reply_blocked`) fails with this tool error, the whole text the agent sees:
 
 ```text
-message blocked by the secret scanner: possible aws-access-key-id on line 2; remove it before sending (Postern blocks messages that look like secrets)
+message blocked by the secret scanner: possible aws-access-key-id on line 2 of the body; remove it before sending
 ```
 
 The error names the rule and the body line, never the matched text; the run asserts that neither the key nor the rest of the body is in it. Nothing was stored or sent. The `postern` skill tells the agent to report the rule and line to the human and not to rephrase, split or encode the text to get past the scanner.

@@ -45,12 +45,11 @@ type Finding struct {
 
 // Error names the rule and line only, never the matched text.
 func (f *Finding) Error() string {
-	where := "on line " + strconv.Itoa(f.Line)
+	where := "on line " + strconv.Itoa(f.Line) + " of the body"
 	if f.Line == 0 {
 		where = "in the subject"
 	}
-	return "possible " + f.Rule + " " + where +
-		"; remove it before sending (Postern blocks messages that look like secrets)"
+	return "possible " + f.Rule + " " + where + "; remove it before sending"
 }
 
 // Check scans the subject (reported as line 0) and then each body line.
