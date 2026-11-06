@@ -30,7 +30,7 @@ Acceptance for v0:
 - Bridge under a separate OS user (closes the same-user residual risk).
 - Hardware-bound keys option.
 - `postern wait` helper.
-- Setup scripts and docs.
+- [x] Setup scripts and docs. Done: `deploy/scripts/` has `issue-cert.sh`, `revoke-cert.sh` (by id or fingerprint), `gen-edge-secret.sh` and `add-fingerprint.sh` (relay.json or Worker `PEERS`), each with `--help` and `--dry-run`; the API token reaches `curl` only on stdin, never argv or env (tested with a fake `curl`). The Docker relay accepts an optional next edge secret, so the edge secret rotates without downtime. docs/deployment.md and docs/edge-setup.md use the scripts and keep the manual commands as a fallback.
 
 ## Before the first real peer connects
 

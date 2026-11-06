@@ -42,7 +42,7 @@ You need:
 - For the relay, one of:
   - **Docker mode:** an always-on host (machine A here) with Docker Compose and `cloudflared` for the tunnel login.
   - **Worker mode:** a Cloudflare Workers account and Node 24 (to run the tests and Wrangler).
-- **`jq`, `curl` (7.55 or later) and `openssl`** on the operator's machine, for issuing certificates.
+- **`curl` (7.76 or later), `openssl` and `python3` (3.8 or later)** on the operator's machine, for the setup scripts in `deploy/scripts/` (certificates, fingerprints, edge secret). The scripts use `python3` for all JSON. **`jq`** only if you use the manual commands instead.
 - For the agent sessions: **Claude Code 2.1.295 or later** and/or **Codex**.
 
 ## 1. Choose a relay mode
@@ -75,9 +75,10 @@ Detail: [edge-setup.md](edge-setup.md) steps 1, 2 and 9. On the relay host, in a
 2. Generate the edge secret. It never appears on the terminal, in argv or in shell history:
 
    ```sh
-   (umask 077 && openssl rand -hex 32 > deploy/secrets/edge-secret)
-   chmod 0400 deploy/secrets/edge-secret
+   deploy/scripts/gen-edge-secret.sh
    ```
+
+   It writes `deploy/secrets/edge-secret` (umask 077, mode 0400, from `openssl rand -hex 32`), refuses to overwrite an existing one, and prints only the path. By hand: `(umask 077 && openssl rand -hex 32 > deploy/secrets/edge-secret) && chmod 0400 deploy/secrets/edge-secret`.
 
 3. Create the tunnel and move its credentials into the secrets directory:
 
@@ -151,7 +152,7 @@ Detail: [edge-setup.md](edge-setup.md) steps 3, 4, 7 and 8. Do all of this befor
    security add-generic-password -a operator -s postern-edge-token -w
    ```
 
-   Then define the `cfapi` helper from [edge-setup.md step 3](edge-setup.md#3-edge-api-token-kept-in-the-keychain), which reads the token from the keychain and passes it to `curl` on stdin. It is used for issuing and revoking certificates and for the mTLS host list. It cannot read or change WAF or transform rules.
+   The token is used for issuing and revoking certificates and for the mTLS host list; it cannot read or change WAF or transform rules. `deploy/scripts/issue-cert.sh` and `revoke-cert.sh` read it from this keychain item themselves and pass it to `curl` only on stdin, never in argv or the environment ([edge-setup.md step 3](edge-setup.md#3-edge-api-token-kept-in-the-keychain)). For the manual commands, define the `cfapi` helper from that step, which does the same.
 
 2. **mTLS for the one hostname.** Dashboard: SSL/TLS, Client Certificates, Hosts, add `postern.example.com`. Or with the API, as in [edge-setup.md step 4](edge-setup.md#4-enable-mtls-for-the-one-hostname) (the `PUT` replaces the whole host list). Set the minimum TLS version to 1.2 or later. Whether mTLS with the Cloudflare-managed CA works on a Free zone and on a Worker custom domain is **unverified**.
 
@@ -259,7 +260,16 @@ Detail: [edge-setup.md step 5](edge-setup.md#5-issue-a-client-certificate-per-br
 
 1. **CSR to the operator.** Each human gives the operator its `peer-a.csr` or `peer-b.csr` from step 5. It is public.
 
-2. **The operator issues each certificate via the API.** Work in a scratch directory outside the repo, with `cfapi` defined as in step 3:
+2. **The operator issues each certificate via the API.** Keep the CSRs and certificates in a scratch directory outside the repo (here `~/postern-certs`), and run the script from the repo checkout:
+
+   ```sh
+   deploy/scripts/issue-cert.sh --zone <ZONE_ID> --csr ~/postern-certs/peer-a.csr --dry-run   # optional: shows the request, token redacted
+   deploy/scripts/issue-cert.sh --zone <ZONE_ID> --csr ~/postern-certs/peer-a.csr             # writes ~/postern-certs/peer-a.pem, 14 days
+   ```
+
+   It writes `peer-a.pem` only if the SHA-256 it computes with `openssl` matches the API's `fingerprint_sha256` and the certificate carries the CSR's key, and prints the certificate id and fingerprint. Keep the id (needed to revoke it) and return `peer-a.pem` to machine A. Repeat for `peer-b`. Whether the API enforces limits on `validity_days` (`--days`) is **unverified**, and so is the exact format of `fingerprint_sha256` (the script ignores case and colons). Detail: [edge-setup.md step 5](edge-setup.md#5-issue-a-client-certificate-per-bridge).
+
+   By hand, in the scratch directory, with `cfapi` defined as in step 3:
 
    ```sh
    jq -n --rawfile csr peer-a.csr '{csr: $csr, validity_days: 14}' > peer-a-req.json
@@ -270,7 +280,7 @@ Detail: [edge-setup.md step 5](edge-setup.md#5-issue-a-client-certificate-per-br
    openssl x509 -in peer-a.pem -outform DER | shasum -a 256 | cut -d' ' -f1
    ```
 
-   Keep the certificate id (needed to revoke it), check that the two fingerprints agree, return `peer-a.pem` to machine A, and delete the request and response files. Repeat for `peer-b`. Whether the API enforces limits on `validity_days` is **unverified**.
+   Then check that the two fingerprints agree and delete the request and response files.
 
 3. **Each bridge imports its certificate:**
 
@@ -289,7 +299,16 @@ Detail: [edge-setup.md step 5](edge-setup.md#5-issue-a-client-certificate-per-br
 
    The first import needs no approval. Check that the SHA-256 matches what the operator computed.
 
-4. **The fingerprints go into the relay config.**
+4. **The fingerprints go into the relay config.** With the script, on the relay host (Docker) or the operator's machine (Worker):
+
+   ```sh
+   deploy/scripts/add-fingerprint.sh --peer peer-a --fingerprint <PEER_A_CERT_SHA256>      # Docker: edits deploy/relay.json
+   deploy/scripts/add-fingerprint.sh --peer peer-a --fingerprint <PEER_A_CERT_SHA256> \
+     --worker-peers relay-worker/wrangler.toml                                            # Worker: edits PEERS
+   ```
+
+   It replaces the peer's placeholder, accepts only 64 lowercase hex characters, refuses a fingerprint another peer has, and allows at most two per peer (old and new during a rotation). Repeat for `peer-b`. Or edit by hand:
+
    - Docker mode: in `deploy/relay.json`, replace the placeholders:
 
      ```json
@@ -415,8 +434,8 @@ For a full walkthrough with real handoffs, see [example.md](example.md).
 
 Do these the same day, with both humans and the operator present.
 
-1. **Revocation drill.** Revoke peer-b's certificate at the edge, confirm `postern edge-check` fails on machine B and that a `send` there reports `queued` with `relay_status: relay_auth_failed`, take the fingerprint out of the relay config, then re-issue and confirm queued messages deliver. Steps: [operations.md](operations.md#revocation-drill-before-the-first-real-peer-connects) (Worker mode: [relay-modes.md](relay-modes.md#revocation-drill)). How fast the edge enforces a revocation is **unverified**; measure it during the drill. Record the date and outcome.
-2. **Certificate rotation cadence.** Certificates are issued for about 14 days and rotate weekly, so there is a week of overlap. Put it on a calendar. Steps: [operations.md](operations.md#weekly-certificate-rotation), [edge-setup.md](edge-setup.md#weekly-rotation), or [relay-modes.md](relay-modes.md#rotation) for Worker mode. In short: `postern cert csr --new-key`, the operator issues and adds the new fingerprint next to the old one, `postern cert import` (asks for approval to switch keys), `postern edge-check`, then the operator removes the old fingerprint and revokes the old certificate.
+1. **Revocation drill.** Revoke peer-b's certificate at the edge (`deploy/scripts/revoke-cert.sh --zone <ZONE_ID> --fingerprint <PEER_B_CERT_SHA256>`), confirm `postern edge-check` fails on machine B and that a `send` there reports `queued` with `relay_status: relay_auth_failed`, replace the fingerprint in the relay config with an unmatchable one (`deploy/scripts/add-fingerprint.sh --peer peer-b --replace <PEER_B_CERT_SHA256> --fingerprint "$(openssl rand -hex 32)"`, plus `--worker-peers relay-worker/wrangler.toml` in Worker mode), then re-issue and confirm queued messages deliver. Steps: [operations.md](operations.md#revocation-drill-before-the-first-real-peer-connects) (Worker mode: [relay-modes.md](relay-modes.md#revocation-drill)). How fast the edge enforces a revocation is **unverified**; measure it during the drill. Record the date and outcome.
+2. **Certificate rotation cadence.** Certificates are issued for about 14 days and rotate weekly, so there is a week of overlap. Put it on a calendar. Steps: [operations.md](operations.md#weekly-certificate-rotation), [edge-setup.md](edge-setup.md#weekly-rotation), or [relay-modes.md](relay-modes.md#rotation) for Worker mode. In short: `postern cert csr --new-key`, the operator issues (`issue-cert.sh`) and adds the new fingerprint next to the old one (`add-fingerprint.sh`), `postern cert import` (asks for approval to switch keys), `postern edge-check`, then the operator removes the old fingerprint (`add-fingerprint.sh --remove`) and revokes the old certificate (`revoke-cert.sh`).
 3. **Security review.** One review covering each item from [PLAN.md](../PLAN.md):
    - [ ] **Key storage:** private keys, the client certificate and the inbox key are only in the keychain; the bridge config holds no secrets; the edge token is only in the operator's keychain; the tunnel credentials and edge secret are mode 0400 files under `deploy/secrets/`.
    - [ ] **No secrets in logs:** `docker compose logs relay` (or Workers Logs) shows method, route, status, duration and peer only, with no bodies, query strings, client addresses or header values ([edge-setup.md](edge-setup.md#verification-checklist) item 10).

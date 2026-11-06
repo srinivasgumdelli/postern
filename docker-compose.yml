@@ -15,7 +15,8 @@
 #   deploy/cloudflared/config.yml        <- deploy/cloudflared/config.example.yml
 #   deploy/secrets/tunnel-credentials.json  (from `cloudflared tunnel create`)
 #   deploy/secrets/edge-secret              (from `openssl rand -hex 32`)
-# See docs/edge-setup.md.
+# See docs/edge-setup.md. To rotate the edge secret without downtime, add
+# deploy/compose.edge-secret-next.yml (the optional next secret) with -f.
 
 name: postern
 

@@ -5,13 +5,15 @@
 // Every request under /v1 is bound to a peer by the SHA-256 fingerprint of
 // that peer's client certificate. In production the edge verifies the
 // certificate and forwards the fingerprint in a header, together with a
-// shared edge secret that shows the request came through the edge; in
+// shared edge secret (one, or two while it rotates) that shows the
+// request came through the edge; in
 // development and tests the relay terminates mTLS itself.
 package relay
 
 import (
 	"bytes"
 	"crypto/sha256"
+	"crypto/subtle"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -77,6 +79,11 @@ type Config struct {
 	// in header identity mode, ignored in mtls mode. It is read once, when
 	// the configuration is validated; its content is never logged.
 	EdgeSecretFile string `json:"edge_secret_file,omitempty"`
+	// EdgeSecretNextFile optionally names a second edge secret, accepted
+	// alongside the first while the edge's transform rule is switched to
+	// it (zero-downtime rotation). Same checks as EdgeSecretFile, and it
+	// must hold a different value. Ignored in mtls mode.
+	EdgeSecretNextFile string `json:"edge_secret_next_file,omitempty"`
 	// Peers maps a peer name to the SHA-256 fingerprints of the client
 	// certificates allowed to act as that peer. Several fingerprints per
 	// peer let an old and a new certificate overlap during rotation.
@@ -85,9 +92,11 @@ type Config struct {
 	PostsPerHour     int                 `json:"posts_per_hour"`
 	MaxQueuedPerPeer int                 `json:"max_queued_per_peer"`
 
-	// edgeSecret is loaded from EdgeSecretFile in header mode. It is a
-	// pointer so that printing a Config shows an address, not the digest.
-	edgeSecret *edgeSecret
+	// edgeSecret is loaded from EdgeSecretFile in header mode, and
+	// edgeSecretNext from EdgeSecretNextFile when that is set. They are
+	// pointers so that printing a Config shows an address, not a digest.
+	edgeSecret     *edgeSecret
+	edgeSecretNext *edgeSecret
 }
 
 // edgeSecret holds only the SHA-256 digest of the edge secret. Comparing
@@ -163,18 +172,30 @@ func (c Config) normalized() (Config, error) {
 			return Config{}, errors.New("relay config: tls is only used with identity \"mtls\"")
 		}
 		// Loaded once: New re-validates a Config from LoadConfig without
-		// reading the file again.
+		// reading the files again.
 		if c.edgeSecret == nil {
-			es, err := loadEdgeSecret(c.EdgeSecretFile)
+			if c.EdgeSecretFile == "" {
+				return Config{}, errors.New("relay config: identity \"header\" needs edge_secret_file")
+			}
+			cur, err := loadEdgeSecret("edge_secret_file", c.EdgeSecretFile)
 			if err != nil {
 				return Config{}, err
 			}
-			c.edgeSecret = es
+			var next *edgeSecret
+			if c.EdgeSecretNextFile != "" {
+				if next, err = loadEdgeSecret("edge_secret_next_file", c.EdgeSecretNextFile); err != nil {
+					return Config{}, err
+				}
+				if subtle.ConstantTimeCompare(cur.digest[:], next.digest[:]) == 1 {
+					return Config{}, errors.New("relay config: edge_secret_next_file holds the same secret as edge_secret_file")
+				}
+			}
+			c.edgeSecret, c.edgeSecretNext = cur, next
 		}
 	case IdentityMTLS:
 		// The edge secret only guards the fingerprint header, which mtls
 		// mode ignores.
-		c.edgeSecret = nil
+		c.edgeSecret, c.edgeSecretNext = nil, nil
 		if c.TLS == nil || c.TLS.CertFile == "" || c.TLS.KeyFile == "" || c.TLS.ClientCAFile == "" {
 			return Config{}, errors.New("relay config: identity \"mtls\" needs tls.cert_file, tls.key_file and tls.client_ca_file")
 		}
@@ -218,39 +239,51 @@ func (c Config) normalized() (Config, error) {
 	return c, nil
 }
 
-// loadEdgeSecret reads and checks the edge secret file. Errors never
-// include the file's content.
-func loadEdgeSecret(path string) (*edgeSecret, error) {
-	if path == "" {
-		return nil, errors.New("relay config: identity \"header\" needs edge_secret_file")
+// EdgeSecretSlots reports how many edge secrets a loaded configuration
+// accepts: 0 in mtls mode, 1 normally, 2 while one rotates. It never
+// reveals the secrets.
+func (c Config) EdgeSecretSlots() int {
+	n := 0
+	if c.edgeSecret != nil {
+		n++
 	}
+	if c.edgeSecretNext != nil {
+		n++
+	}
+	return n
+}
+
+// loadEdgeSecret reads and checks one edge secret file. field is the
+// config field that named it, for errors; errors never include the
+// file's content.
+func loadEdgeSecret(field, path string) (*edgeSecret, error) {
 	f, err := os.Open(path)
 	if err != nil {
-		return nil, errors.New("relay config: cannot open edge_secret_file")
+		return nil, fmt.Errorf("relay config: cannot open %s", field)
 	}
 	defer f.Close()
 	raw, err := io.ReadAll(io.LimitReader(f, maxEdgeSecretBytes+1))
 	if err != nil {
-		return nil, errors.New("relay config: cannot read edge_secret_file")
+		return nil, fmt.Errorf("relay config: cannot read %s", field)
 	}
 	defer clear(raw)
 	if len(raw) > maxEdgeSecretBytes {
-		return nil, errors.New("relay config: edge_secret_file is too large")
+		return nil, fmt.Errorf("relay config: %s is too large", field)
 	}
 	v := bytes.TrimSuffix(raw, []byte("\n"))
 	v = bytes.TrimSuffix(v, []byte("\r"))
 	if len(v) < MinEdgeSecretBytes {
-		return nil, fmt.Errorf("relay config: edge secret must be at least %d bytes", MinEdgeSecretBytes)
+		return nil, fmt.Errorf("relay config: edge secret in %s must be at least %d bytes", field, MinEdgeSecretBytes)
 	}
 	for _, c := range v {
 		// Printable ASCII without spaces: the edge sends it as a static
 		// header value.
 		if c <= ' ' || c > '~' {
-			return nil, errors.New("relay config: edge secret must be printable ASCII without spaces")
+			return nil, fmt.Errorf("relay config: edge secret in %s must be printable ASCII without spaces", field)
 		}
 	}
 	if looksLikePlaceholder(v) {
-		return nil, errors.New("relay config: edge secret looks like a placeholder; generate one with `openssl rand -hex 32`")
+		return nil, fmt.Errorf("relay config: edge secret in %s looks like a placeholder; generate one with `openssl rand -hex 32`", field)
 	}
 	return &edgeSecret{digest: sha256.Sum256(v)}, nil
 }

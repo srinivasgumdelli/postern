@@ -117,9 +117,9 @@ Do not run `wrangler tail` against the production Worker as a habit: a tail stre
 ### Rotation
 
 1. The bridge makes a new key and CSR (`postern cert csr --new-key`) and the operator issues a certificate.
-2. Add the new fingerprint next to the old one in `PEERS` and `npx wrangler deploy`. Vars change only with a deploy.
+2. Add the new fingerprint next to the old one in `PEERS` (`deploy/scripts/add-fingerprint.sh --worker-peers relay-worker/wrangler.toml --peer peer-a --fingerprint <NEW_SHA256>`, which edits only the `PEERS` line) and `npx wrangler deploy`. Vars change only with a deploy.
 3. The bridge imports the certificate (`postern cert import`) and runs `postern edge-check`.
-4. Remove the old fingerprint from `PEERS`, deploy again, and revoke the old certificate at the edge.
+4. Remove the old fingerprint from `PEERS` (the same script with `--remove --fingerprint <OLD_SHA256>`), deploy again, and revoke the old certificate at the edge (`deploy/scripts/revoke-cert.sh`).
 
 ### Revocation drill
 

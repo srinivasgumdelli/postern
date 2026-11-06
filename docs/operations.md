@@ -93,7 +93,7 @@ Do this once, on the same day, with both operators present.
 1. The operator revokes peer-b's current certificate at the edge.
 2. On machine B, `postern edge-check` must fail: requests with that certificate are blocked at the edge.
 3. A peer-b session's `send` reports the message as queued with `relay_status: relay_auth_failed`, and its `check_inbox` reports the same; peer-a receives nothing new.
-4. The operator takes the revoked fingerprint out of `relay.json` as well and restarts the relay (in Worker mode: out of `PEERS`, then redeploys). Every peer must keep at least one fingerprint: the Docker relay refuses to start, and the Worker answers 500 to everyone, when a peer has none. If the replacement certificate is not issued yet, put a fingerprint that matches no certificate in its place (`openssl rand -hex 32`).
+4. The operator takes the revoked fingerprint out of `relay.json` as well and restarts the relay (in Worker mode: out of `PEERS`, then redeploys). Every peer must keep at least one fingerprint: the Docker relay refuses to start, and the Worker answers 500 to everyone, when a peer has none. If the replacement certificate is not issued yet, put a fingerprint that matches no certificate in its place (`openssl rand -hex 32`). The operator scripts do both steps: `deploy/scripts/revoke-cert.sh --zone <ZONE_ID> --fingerprint <PEER_B_CERT_SHA256>`, then `deploy/scripts/add-fingerprint.sh --peer peer-b --replace <PEER_B_CERT_SHA256> --fingerprint "$(openssl rand -hex 32)"` (see [edge-setup.md](edge-setup.md#revoke)).
 5. Re-issue: peer-b runs `postern cert csr --new-key`, the operator issues and registers the new certificate, `postern cert import`, `postern edge-check` passes, and queued messages deliver.
 
 Record the date and outcome. Repeat after any change to the edge rules.
@@ -109,7 +109,7 @@ Record the date and outcome. Repeat after any change to the edge rules.
 | A Touch ID or password dialog for `postern` appears that you did not expect | Something tried to change what the bridge trusts. Cancel it, then find out what ran it. |
 | Thread circuit breaker tripped | Read the thread first. If the loop is understood, `postern thread reset <thread>`. |
 | Relay host or edge account compromised | Content stays sealed. Rotate the edge API token, tunnel credentials and edge secret ([edge-setup.md](edge-setup.md#edge-secret-rotation)), redeploy the relay, rotate client certificates. |
-| Relay logs show `edge secret rejected` | Something reached the relay without going through the edge (or the transform rule's secret is out of date). The `reason` says whether the header was missing, wrong or repeated. Find what on the relay host or internal network sent it; if the rule was just changed, re-check it against `deploy/secrets/edge-secret`. |
+| Relay logs show `edge secret rejected` | Something reached the relay without going through the edge (or the transform rule's secret is out of date). The `reason` says whether the header was missing, wrong or repeated. Find what on the relay host or internal network sent it; if the rule was just changed, re-check it against `deploy/secrets/edge-secret` (or `edge-secret-next` during a [rotation](edge-setup.md#edge-secret-rotation)). |
 
 ## Residual risks (v0)
 

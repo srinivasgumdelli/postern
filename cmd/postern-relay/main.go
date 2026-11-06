@@ -119,7 +119,8 @@ func run(args []string, stderr io.Writer) int {
 			serveErr <- hs.Serve(ln)
 		}
 	}()
-	logger.Info("relay listening", "listen", cfg.Listen, "identity", cfg.Identity, "peers", len(cfg.Peers))
+	logger.Info("relay listening", "listen", cfg.Listen, "identity", cfg.Identity, "peers", len(cfg.Peers),
+		"edge_secrets", cfg.EdgeSecretSlots())
 
 	code := 0
 	select {

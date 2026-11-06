@@ -195,9 +195,10 @@ func cleanPathOnly(next http.Handler) http.Handler {
 
 type ctxKey struct{}
 
-// reqInfo carries the authenticated peer from the handler back to the
-// access log.
-type reqInfo struct{ peer string }
+// reqInfo carries the authenticated peer, and in header mode which edge
+// secret slot matched ("current" or "next"), from the handler back to
+// the access log.
+type reqInfo struct{ peer, edgeSlot string }
 
 // authenticate maps the request's client-certificate fingerprint to a
 // configured peer. It writes 401 when the request carries no identity
@@ -207,10 +208,14 @@ func (s *Server) authenticate(w http.ResponseWriter, r *http.Request) (string, b
 	if s.cfg.Identity == IdentityHeader {
 		// Before any identity mapping: without the edge secret the
 		// fingerprint header is just a claim by whoever reached us.
-		if reason, ok := s.edgeSecretOK(r); !ok {
+		slot, reason, ok := s.edgeSecretOK(r)
+		if !ok {
 			s.log.Warn("edge secret rejected", "reason", reason)
 			writeError(w, http.StatusUnauthorized, "no_identity")
 			return "", false
+		}
+		if info, _ := r.Context().Value(ctxKey{}).(*reqInfo); info != nil {
+			info.edgeSlot = slot
 		}
 	}
 	fp, present := s.fingerprint(r)
@@ -229,29 +234,40 @@ func (s *Server) authenticate(w http.ResponseWriter, r *http.Request) (string, b
 	return peer, true
 }
 
+// edgeSlots names the configured edge secrets for the access log.
+var edgeSlots = [2]string{"current", "next"}
+
 // edgeSecretOK checks the edge secret header in header identity mode. It
 // compares SHA-256 digests with crypto/subtle, so neither the value nor
-// its length leaks through timing. reason is a fixed word for the log;
-// the header value is never logged. The header is removed from r so no
-// later code can log or echo it.
-func (s *Server) edgeSecretOK(r *http.Request) (reason string, ok bool) {
+// its length leaks through timing. When a next secret is configured (a
+// rotation in progress) the value is compared with both, always, and the
+// results are combined without branching, so timing does not show which
+// one matched. slot is "current" or "next" on success; reason is a fixed
+// word for the log on failure. The header value is never logged, and the
+// header is removed from r so no later code can log or echo it.
+func (s *Server) edgeSecretOK(r *http.Request) (slot, reason string, ok bool) {
 	vals := r.Header.Values(EdgeSecretHeader)
 	r.Header.Del(EdgeSecretHeader)
 	if s.cfg.edgeSecret == nil {
-		return "not_configured", false // unreachable: New requires it
+		return "", "not_configured", false // unreachable: New requires it
 	}
 	switch len(vals) {
 	case 0:
-		return "missing", false
+		return "", "missing", false
 	case 1:
 	default:
-		return "multiple", false
+		return "", "multiple", false
 	}
 	got := sha256.Sum256([]byte(vals[0]))
-	if subtle.ConstantTimeCompare(got[:], s.cfg.edgeSecret.digest[:]) != 1 {
-		return "mismatch", false
+	cur := subtle.ConstantTimeCompare(got[:], s.cfg.edgeSecret.digest[:])
+	next := 0
+	if s.cfg.edgeSecretNext != nil { // configuration, not input
+		next = subtle.ConstantTimeCompare(got[:], s.cfg.edgeSecretNext.digest[:])
 	}
-	return "", true
+	if cur|next != 1 {
+		return "", "mismatch", false
+	}
+	return edgeSlots[subtle.ConstantTimeSelect(next, 1, 0)], "", true
 }
 
 // fingerprint returns the normalized SHA-256 fingerprint of the client
@@ -546,7 +562,8 @@ func writeJSON(w http.ResponseWriter, status int, v any) {
 // --- access log ---
 
 // accessLog writes one JSON line per request with method, route pattern,
-// status, response bytes, duration and peer. It never logs the query
+// status, response bytes, duration and peer, plus in header mode the
+// name of the edge secret slot that matched. It never logs the query
 // string, request body, headers or remote address.
 func (s *Server) accessLog(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -561,14 +578,20 @@ func (s *Server) accessLog(next http.Handler) http.Handler {
 		if sw.status == 0 {
 			sw.status = http.StatusOK
 		}
-		s.log.LogAttrs(context.Background(), slog.LevelInfo, "request",
+		attrs := []slog.Attr{
 			slog.String("method", logMethod(r.Method)),
 			slog.String("route", r.Pattern),
 			slog.Int("status", sw.status),
 			slog.Int64("bytes", sw.bytes),
 			slog.Int64("duration_ms", time.Since(start).Milliseconds()),
 			slog.String("peer", info.peer),
-		)
+		}
+		if info.edgeSlot != "" {
+			// The slot name only, so the operator can see when the edge
+			// has switched to the next secret during a rotation.
+			attrs = append(attrs, slog.String("edge_secret_slot", info.edgeSlot))
+		}
+		s.log.LogAttrs(context.Background(), slog.LevelInfo, "request", attrs...)
 	})
 }
 

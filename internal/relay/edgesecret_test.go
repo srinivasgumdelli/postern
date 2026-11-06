@@ -204,7 +204,8 @@ func TestEdgeSecretUsesConstantTimeCompare(t *testing.T) {
 	if fn == nil {
 		t.Fatal("edgeSecretOK not found in server.go")
 	}
-	constantTime := false
+	// One comparison per slot: current and next.
+	constantTime := 0
 	ast.Inspect(fn.Body, func(n ast.Node) bool {
 		switch n := n.(type) {
 		case *ast.CallExpr:
@@ -212,7 +213,7 @@ func TestEdgeSecretUsesConstantTimeCompare(t *testing.T) {
 				if pkg, ok := sel.X.(*ast.Ident); ok {
 					switch pkg.Name + "." + sel.Sel.Name {
 					case "subtle.ConstantTimeCompare":
-						constantTime = true
+						constantTime++
 					case "bytes.Equal", "bytes.Compare", "strings.Compare", "strings.EqualFold", "bytes.EqualFold", "reflect.DeepEqual", "slices.Equal":
 						t.Errorf("%s: edge secret compared with %s.%s", fset.Position(n.Pos()), pkg.Name, sel.Sel.Name)
 					}
@@ -231,9 +232,26 @@ func TestEdgeSecretUsesConstantTimeCompare(t *testing.T) {
 		}
 		return true
 	})
-	if !constantTime {
-		t.Fatal("edgeSecretOK does not use subtle.ConstantTimeCompare")
+	if constantTime != 2 {
+		t.Fatalf("edgeSecretOK calls subtle.ConstantTimeCompare %d times, want 2 (current and next)", constantTime)
 	}
+	// No early exit between the two comparisons: a return after the
+	// first would show by timing whether the current secret matched.
+	var compares []token.Pos
+	ast.Inspect(fn.Body, func(n ast.Node) bool {
+		if c, ok := n.(*ast.CallExpr); ok {
+			if sel, ok := c.Fun.(*ast.SelectorExpr); ok && sel.Sel.Name == "ConstantTimeCompare" {
+				compares = append(compares, c.Pos())
+			}
+		}
+		return true
+	})
+	ast.Inspect(fn.Body, func(n ast.Node) bool {
+		if r, ok := n.(*ast.ReturnStmt); ok && r.Pos() > compares[0] && r.Pos() < compares[len(compares)-1] {
+			t.Errorf("%s: return between the two edge secret comparisons", fset.Position(r.Pos()))
+		}
+		return true
+	})
 	// And the server must actually route header-mode requests through it.
 	found := false
 	ast.Inspect(file, func(n ast.Node) bool {
@@ -262,7 +280,7 @@ func mentionsSecret(e ast.Expr) bool {
 	ast.Inspect(e, func(n ast.Node) bool {
 		switch n := n.(type) {
 		case *ast.Ident:
-			if n.Name == "digest" || n.Name == "got" || n.Name == "edgeSecret" {
+			if n.Name == "digest" || n.Name == "got" || n.Name == "edgeSecret" || n.Name == "edgeSecretNext" {
 				found = true
 			}
 		case *ast.IndexExpr:
